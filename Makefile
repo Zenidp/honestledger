@@ -7,13 +7,16 @@ install-frontend:
 	cd frontend && npm install
 
 run:
+	uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000
+
+run-dev:
 	uv run uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 
 run-frontend:
 	cd frontend && npm run dev
 
 run-all:
-	uv run uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000 &
+	uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000 &
 	cd frontend && npm run dev
 
 smoke-test:
