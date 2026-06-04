@@ -26,6 +26,3 @@ def get_gemini_client():
         location=GOOGLE_CLOUD_LOCATION,
     )
 
-# Suppress noisy OTel export error logs — failures are non-fatal
-import logging
-logging.getLogger("opentelemetry.sdk.trace.export").setLevel(logging.CRITICAL)

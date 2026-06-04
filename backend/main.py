@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+# Suppress noisy OTel export timeout logs — Phoenix failures are non-fatal
+import logging
+logging.getLogger("opentelemetry.sdk.trace.export").setLevel(logging.CRITICAL)
+logging.getLogger("opentelemetry.exporter.otlp").setLevel(logging.CRITICAL)
+
 from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
