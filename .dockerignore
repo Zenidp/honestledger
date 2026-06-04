@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+frontend/
+docs/
+scripts/
+context.md
+perintah.md
+*.md
+.git/
+.gitignore
