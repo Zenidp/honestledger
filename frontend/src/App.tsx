@@ -177,6 +177,8 @@ export default function App() {
         {/* Action bar */}
         <ActionBar
           status={status}
+          hasReconcile={reconcile !== null}
+          hasProposal={proposal !== null}
           onReconcile={handleReconcile}
           onJudge={handleJudge}
           onVerify={handleVerify}

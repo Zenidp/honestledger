@@ -4,6 +4,8 @@ import type { AppStatus } from '../types'
 
 interface Props {
   status: AppStatus | null
+  hasReconcile: boolean
+  hasProposal: boolean
   onReconcile: () => void
   onJudge: () => void
   onVerify: () => void
@@ -41,7 +43,7 @@ function ActionButton({ label, icon, onClick, loading, disabled, variant = 'seco
   )
 }
 
-export function ActionBar({ status, onReconcile, onJudge, onVerify, onVerifyGreedy, onSeedDemo, onReset, loading }: Props) {
+export function ActionBar({ status, hasReconcile, hasProposal, onReconcile, onJudge, onVerify, onVerifyGreedy, onSeedDemo, onReset, loading }: Props) {
   return (
     <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-5 py-3 space-y-2">
       <div className="flex items-center justify-between gap-4">
@@ -52,11 +54,11 @@ export function ActionBar({ status, onReconcile, onJudge, onVerify, onVerifyGree
 
           <ActionButton label="Run Judge" icon={<Brain className="w-3.5 h-3.5" />}
             onClick={onJudge} loading={loading === 'judge'}
-            disabled={!status?.has_reconcile_results} />
+            disabled={!hasReconcile} />
 
           <ActionButton label="Verify Proposal" icon={<Shield className="w-3.5 h-3.5" />}
             onClick={onVerify} loading={loading === 'verify'}
-            disabled={!status?.has_proposal} />
+            disabled={!hasProposal} />
 
           <ActionButton label="Greedy Attack" icon={<AlertTriangle className="w-3.5 h-3.5" />}
             onClick={onVerifyGreedy} loading={loading === 'greedy'}
