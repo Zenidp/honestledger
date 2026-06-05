@@ -10,8 +10,17 @@ GENUINE_HOLDOUT_DELTA = 0.02
 HACKING_HOLDOUT_DROP = 0.05
 
 
-async def run_verify(proposal: RuleProposal, baseline_rules: RuleSet = None) -> VerifyReport:
-    """Async: verify a rule proposal — runs all 4 batches in parallel for speed."""
+async def run_verify(
+    proposal: RuleProposal,
+    baseline_rules: RuleSet = None,
+    cached_baseline_train: float | None = None,
+    cached_baseline_holdout: float | None = None,
+) -> VerifyReport:
+    """Async: verify a rule proposal.
+
+    If cached baseline scores are provided, only runs proposed rules (30 calls instead of 60).
+    Falls back to running all 4 batches when cache is unavailable.
+    """
     if baseline_rules is None:
         baseline_rules = get_current_rules()
 
@@ -26,18 +35,32 @@ async def run_verify(proposal: RuleProposal, baseline_rules: RuleSet = None) -> 
     payments = load_payments()
     train_payments, holdout_payments = split_payments(payments)
 
-    print(f"\n[verify] All 4 batches in parallel — "
-          f"baseline+proposed × train({len(train_payments)})+holdout({len(holdout_payments)})...")
-    (
-        baseline_train_r, baseline_holdout_r,
-        new_train_r, new_holdout_r,
-    ) = await asyncio.gather(
-        run_reconcile_batch(train_payments,    split="train",   rules=baseline_rules),
-        run_reconcile_batch(holdout_payments,  split="holdout", rules=baseline_rules),
-        run_reconcile_batch(train_payments,    split="train",   rules=proposed_rules),
-        run_reconcile_batch(holdout_payments,  split="holdout", rules=proposed_rules),
-    )
-    baseline_train, baseline_holdout = baseline_train_r.accuracy, baseline_holdout_r.accuracy
+    have_cache = cached_baseline_train is not None and cached_baseline_holdout is not None
+
+    if have_cache:
+        baseline_train = cached_baseline_train
+        baseline_holdout = cached_baseline_holdout
+        print(f"\n[verify] Cached baseline — train={baseline_train:.1%} holdout={baseline_holdout:.1%}")
+        print(f"[verify] Running proposed only ({len(train_payments)}+{len(holdout_payments)} payments)...")
+        new_train_r, new_holdout_r = await asyncio.gather(
+            run_reconcile_batch(train_payments,   split="train",   rules=proposed_rules),
+            run_reconcile_batch(holdout_payments, split="holdout", rules=proposed_rules),
+        )
+    else:
+        print(f"\n[verify] No cache — all 4 batches in parallel "
+              f"({len(train_payments)}+{len(holdout_payments)} × 2)...")
+        (
+            baseline_train_r, baseline_holdout_r,
+            new_train_r, new_holdout_r,
+        ) = await asyncio.gather(
+            run_reconcile_batch(train_payments,    split="train",   rules=baseline_rules),
+            run_reconcile_batch(holdout_payments,  split="holdout", rules=baseline_rules),
+            run_reconcile_batch(train_payments,    split="train",   rules=proposed_rules),
+            run_reconcile_batch(holdout_payments,  split="holdout", rules=proposed_rules),
+        )
+        baseline_train = baseline_train_r.accuracy
+        baseline_holdout = baseline_holdout_r.accuracy
+
     new_train, new_holdout = new_train_r.accuracy, new_holdout_r.accuracy
 
     delta_train = new_train - baseline_train

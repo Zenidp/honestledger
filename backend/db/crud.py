@@ -157,6 +157,15 @@ async def get_latest_reconcile(db: AsyncSession, tenant_id: str) -> ReconcileRes
     return result.scalar_one_or_none()
 
 
+async def update_reconcile_holdout(db: AsyncSession, row_id: str, holdout_accuracy: float) -> None:
+    """Store holdout baseline score inside the results JSON of a reconcile row."""
+    result = await db.execute(select(ReconcileResult).where(ReconcileResult.id == row_id))
+    row = result.scalar_one_or_none()
+    if row:
+        row.results = {**row.results, "holdout_accuracy": holdout_accuracy}
+        await db.commit()
+
+
 # ── Rule Proposals ────────────────────────────────────────────────────────────
 
 async def save_proposal(db: AsyncSession, tenant_id: str, proposal: dict) -> RuleProposal:

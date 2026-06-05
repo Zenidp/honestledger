@@ -11,7 +11,7 @@ from backend.agent.rules import get_current_rules, get_current_version
 from backend.data.loader import load_invoices, score_results
 
 _AGGRESSIVE_THRESHOLD = 0.05
-_RECONCILE_SEM = asyncio.Semaphore(4)  # max 4 concurrent — safe under Vertex AI quota
+_RECONCILE_SEM = asyncio.Semaphore(3)  # max 3 concurrent — ~40 QPM, safe under Vertex AI quota
 
 _AGGRESSIVE_MODE_INSTRUCTION = """
 

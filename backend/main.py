@@ -304,6 +304,20 @@ def _generate_audit_pdf(results: list, row, tenant_name: str,
 
 # ── Background job runner ──────────────────────────────────────────────────────
 
+async def _cache_holdout_baseline(row_id: str, rules: RuleSet):
+    """Background: score holdout baseline so verify can skip re-running it."""
+    from backend.db.database import AsyncSessionLocal
+    from backend.data.loader import split_payments, load_payments
+    try:
+        _, holdout_payments = split_payments(load_payments())
+        report = await run_reconcile_batch(holdout_payments, split="holdout", rules=rules)
+        async with AsyncSessionLocal() as db:
+            await crud.update_reconcile_holdout(db, row_id, report.accuracy)
+        print(f"  [cache] Holdout baseline stored: {report.accuracy:.1%}", flush=True)
+    except Exception as e:
+        print(f"  [cache] Holdout baseline failed (non-fatal): {e}", flush=True)
+
+
 async def _run_verify_job(job_id: str, tenant_id: str, proposal: RuleProposal, baseline_rules: RuleSet):
     from backend.db.database import AsyncSessionLocal
     async with AsyncSessionLocal() as db:
@@ -315,8 +329,19 @@ async def _run_verify_job(job_id: str, tenant_id: str, proposal: RuleProposal, b
 
         try:
             await _step("Initializing verification framework...")
-            await _step(f"Running train + holdout reconciliation with '{proposal.rule_version}'...")
-            report = await run_verify(proposal, baseline_rules)
+
+            # Use cached baseline scores if available to skip re-running baseline reconcile
+            reconcile_row = await crud.get_latest_reconcile(db, tenant_id)
+            cached_train = reconcile_row.accuracy if reconcile_row else None
+            cached_holdout = (reconcile_row.results or {}).get("holdout_accuracy") if reconcile_row else None
+            if cached_train and cached_holdout:
+                await _step(f"Baseline cached (train={cached_train:.0%} holdout={cached_holdout:.0%}) — running proposed rules only...")
+            else:
+                await _step(f"Running train + holdout reconciliation with '{proposal.rule_version}'...")
+
+            report = await run_verify(proposal, baseline_rules,
+                                      cached_baseline_train=cached_train,
+                                      cached_baseline_holdout=cached_holdout)
 
             await _step(f"Train score: {round(report.score_train * 100, 1)}%  |  Holdout score: {round(report.score_holdout * 100, 1)}%")
             await _step(f"Delta holdout: {report.delta_holdout:+.1%}  →  Verdict: {report.verdict.value}")
@@ -481,13 +506,18 @@ async def reconcile(
 
     report = await run_reconcile_batch(payments, split=req.split, rules=rules)
     report_dict = _reconcile_to_dict(report)
-    await crud.save_reconcile_result(db, tenant.id, {
+    row = await crud.save_reconcile_result(db, tenant.id, {
         "results": report_dict["results"],
         "accuracy": report.accuracy,
         "total": report.total,
         "correct": report.correct,
         "rule_version": report.rule_version,
     })
+
+    # Background: score holdout baseline so verify can skip re-running it
+    if req.split == "train":
+        asyncio.create_task(_cache_holdout_baseline(row.id, rules))
+
     return report_dict
 
 
