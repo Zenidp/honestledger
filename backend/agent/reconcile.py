@@ -11,6 +11,7 @@ from backend.agent.rules import get_current_rules, get_current_version
 from backend.data.loader import load_invoices, score_results
 
 _AGGRESSIVE_THRESHOLD = 0.05
+_RECONCILE_SEM = asyncio.Semaphore(5)  # max 5 concurrent Gemini calls
 
 _AGGRESSIVE_MODE_INSTRUCTION = """
 
@@ -140,31 +141,38 @@ async def reconcile_payment(payment, invoices, rules: RuleSet = None) -> MatchRe
                 )
 
 
+async def _reconcile_one(idx: int, total: int, payment, invoices, rules: RuleSet) -> MatchResult:
+    """Reconcile one payment, rate-limited by module semaphore."""
+    async with _RECONCILE_SEM:
+        result = await reconcile_payment(payment, invoices, rules)
+    status = "✓" if result.decision != MatchDecision.UNCERTAIN else "?"
+    print(f"    [{idx:02d}/{total}] {payment.id} → {result.decision.value} "
+          f"(conf={result.confidence:.2f}) {status}", flush=True)
+    return result
+
+
 async def run_reconcile_batch(payments, split: str = "train", rules: RuleSet = None) -> ReconcileReport:
-    """Async: reconcile a list of payments and return a scored report."""
+    """Async: reconcile all payments in parallel (semaphore-limited) and return a scored report."""
     if rules is None:
         rules = get_current_rules()
 
     invoices = load_invoices()
-    results = []
+    total = len(payments)
+    print(f"  Reconciling {total} payments in parallel (split={split})...", flush=True)
 
-    print(f"  Reconciling {len(payments)} payments (split={split})...", flush=True)
-    for i, payment in enumerate(payments, 1):
-        result = await reconcile_payment(payment, invoices, rules)
-        results.append(result)
-        if i < len(payments):
-            await asyncio.sleep(4)
-        status = "✓" if result.decision != MatchDecision.UNCERTAIN else "?"
-        print(f"    [{i:02d}/{len(payments)}] {payment.id} → {result.decision.value} "
-              f"(conf={result.confidence:.2f}) {status}", flush=True)
+    tasks = [
+        _reconcile_one(i + 1, total, payment, invoices, rules)
+        for i, payment in enumerate(payments)
+    ]
+    results = list(await asyncio.gather(*tasks))
 
-    accuracy, correct, total = score_results(results, split=split)
-    print(f"  Score: {correct}/{total} = {accuracy:.1%}", flush=True)
+    accuracy, correct, scored_total = score_results(results, split=split)
+    print(f"  Score: {correct}/{scored_total} = {accuracy:.1%}", flush=True)
 
     return ReconcileReport(
         results=results,
         accuracy=accuracy,
-        total=total,
+        total=scored_total,
         correct=correct,
         rule_version=rules.version if rules else get_current_version(),
     )

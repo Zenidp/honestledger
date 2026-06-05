@@ -14,14 +14,12 @@ async def _run_on_splits(rules: RuleSet) -> tuple[float, float]:
     payments = load_payments()
     train_payments, holdout_payments = split_payments(payments)
 
-    print(f"  [verify] TRAIN ({len(train_payments)} payments) with rules={rules.version}...")
-    train_report = await run_reconcile_batch(train_payments, split="train", rules=rules)
-
-    await asyncio.sleep(2)
-
-    print(f"  [verify] HOLDOUT ({len(holdout_payments)} payments) with rules={rules.version}...")
-    holdout_report = await run_reconcile_batch(holdout_payments, split="holdout", rules=rules)
-
+    print(f"  [verify] TRAIN+HOLDOUT in parallel (rules={rules.version}, "
+          f"{len(train_payments)}+{len(holdout_payments)} payments)...")
+    train_report, holdout_report = await asyncio.gather(
+        run_reconcile_batch(train_payments, split="train", rules=rules),
+        run_reconcile_batch(holdout_payments, split="holdout", rules=rules),
+    )
     return train_report.accuracy, holdout_report.accuracy
 
 
