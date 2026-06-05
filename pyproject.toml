@@ -22,6 +22,9 @@ dependencies = [
     "arize-phoenix-otel>=0.6.0",
     "opentelemetry-sdk>=1.27.0",
     "opentelemetry-exporter-otlp-proto-http>=1.27.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29.0",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

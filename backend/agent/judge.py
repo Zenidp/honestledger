@@ -1,8 +1,8 @@
-"""Layer 2: LLM-as-a-Judge — reads Phoenix traces, diagnoses errors, proposes rules."""
+"""Layer 2: LLM-as-a-Judge — reads Phoenix traces, diagnoses errors, proposes rules (async)."""
 
+import asyncio
 import json
 import re
-import time
 from backend.config import get_gemini_client, GEMINI_MODEL
 from backend.models.schemas import RuleProposal
 from backend.tracing.mcp_client import get_phoenix_client
@@ -28,7 +28,6 @@ Focus on PRECISE improvements — only change parameters where the trace evidenc
 
 
 def _build_error_analysis(results) -> str:
-    """Build a human-readable error analysis from reconcile results + ground truth."""
     gt = load_ground_truth()
     lines = ["Reconciliation errors found:\n"]
     error_count = 0
@@ -38,7 +37,6 @@ def _build_error_analysis(results) -> str:
         expected = expected_info.get("correct_invoice_id", "?")
         predicted = r.matched_invoice_id or "none"
 
-        # Check if wrong
         is_error = False
         if expected == "none" and r.decision.value != "unmatched":
             is_error = True
@@ -48,18 +46,16 @@ def _build_error_analysis(results) -> str:
             if expected_set != predicted_set:
                 is_error = True
 
-        status = "ERROR" if is_error else "OK"
         if is_error:
             error_count += 1
             lines.append(
-                f"  [{status}] {r.payment_id}: predicted={predicted} | "
+                f"  [ERROR] {r.payment_id}: predicted={predicted} | "
                 f"expected={expected} | confidence={r.confidence:.2f}\n"
                 f"         rationale: {r.rationale}"
             )
 
     if error_count == 0:
         lines.append("  No errors found — agent performed perfectly on this batch.")
-        # Still analyse uncertain decisions
         uncertain = [r for r in results if r.decision.value == "uncertain"]
         if uncertain:
             lines.append(f"\n  {len(uncertain)} uncertain decision(s) that could be improved:")
@@ -75,18 +71,15 @@ def _build_error_analysis(results) -> str:
 
 
 def _parse_judge_response(raw: str, next_version: str) -> RuleProposal:
-    """Parse Gemini judge JSON into RuleProposal."""
     try:
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()
         data = json.loads(clean)
-
         changes = []
         for change in data.get("proposed_rule_changes", []):
             param = change.get("parameter", "")
             new_val = change.get("new_value", "")
             if param and new_val:
                 changes.append(f"{param}={new_val}")
-
         return RuleProposal(
             rule_version=next_version,
             description=data.get("description", "Judge proposal"),
@@ -102,8 +95,8 @@ def _parse_judge_response(raw: str, next_version: str) -> RuleProposal:
         )
 
 
-def run_judge(results, current_rules, next_version: str = "v2") -> RuleProposal:
-    """Full judge pipeline: fetch traces → analyse errors → propose rules."""
+async def run_judge(results, current_rules, next_version: str = "v2") -> RuleProposal:
+    """Async: full judge pipeline — fetch traces → analyse errors → propose rules."""
     from google.genai import types
     from google.genai.errors import ClientError
 
@@ -135,7 +128,7 @@ def run_judge(results, current_rules, next_version: str = "v2") -> RuleProposal:
 
     for attempt in range(3):
         try:
-            response = client.models.generate_content(
+            response = await client.aio.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
@@ -150,6 +143,6 @@ def run_judge(results, current_rules, next_version: str = "v2") -> RuleProposal:
             if "429" in str(e) and attempt < 2:
                 wait = 15 * (2 ** attempt)
                 print(f"  [Judge] Rate limit, waiting {wait}s...")
-                time.sleep(wait)
+                await asyncio.sleep(wait)
             else:
                 raise

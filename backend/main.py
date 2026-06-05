@@ -1,26 +1,36 @@
-"""HonestLedger FastAPI backend — all three layers exposed as REST endpoints."""
+"""HonestLedger FastAPI backend — async, multi-tenant, Supabase-backed."""
 
 from __future__ import annotations
 
-# Suppress noisy OTel export timeout logs — Phoenix failures are non-fatal
 import logging
 logging.getLogger("opentelemetry.sdk.trace.export").setLevel(logging.CRITICAL)
 logging.getLogger("opentelemetry.exporter.otlp").setLevel(logging.CRITICAL)
 
-import threading
+import asyncio
+import csv
+import io
 import uuid
 from typing import Optional
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Header
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.config import ADMIN_SECRET
+from backend.db.database import get_db, init_db
+from backend.db.models import Tenant
+from backend.db import crud
+from backend.auth.middleware import get_tenant
 from backend.tracing.phoenix_setup import setup_phoenix_tracing
 from backend.models.schemas import (
-    RuleProposal, RuleSet, ReconcileReport, VerifyReport, VerifyVerdict
+    RuleProposal, RuleSet, ReconcileReport, VerifyReport, VerifyVerdict, MatchResult, MatchDecision
 )
 from backend.agent.rules import (
-    get_current_rules, get_current_version, list_versions, get_rules,
-    apply_rule_proposal, register_rules, set_current_version
+    get_current_rules, get_current_version, apply_rule_proposal,
+    _RULE_REGISTRY, _DEFAULT_RULES,
 )
 from backend.data.loader import (
     load_payments, load_invoices, split_payments, load_ground_truth
@@ -31,7 +41,7 @@ from backend.agent.verify import run_verify
 
 # ── App setup ──────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="HonestLedger API", version="1.0.0")
+app = FastAPI(title="HonestLedger API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,450 +50,454 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-try:
-    setup_phoenix_tracing()
-except Exception as e:
-    import logging
-    logging.getLogger(__name__).warning(f"Phoenix tracing skipped: {e}")
-
-# ── In-memory state ─────────────────────────────────────────────────────────────
-
-class _State:
-    reconcile_report: Optional[ReconcileReport] = None
-    proposal: Optional[RuleProposal] = None
-    verify_report: Optional[VerifyReport] = None
-    iteration_history: list[dict] = []
-
-_s = _State()
-
-# ── Background job store ────────────────────────────────────────────────────────
-# Stores long-running verify jobs: {job_id: {status, result, error, progress}}
-_jobs: dict[str, dict] = {}
 
 
-def _run_verify_job(job_id: str, proposal: RuleProposal, baseline_rules) -> None:
-    """Run verify in a background thread and update job store when done.
 
-    For REWARD_HACKING verdicts: auto-records to history and clears the proposal
-    per spec — cheating attempts are rejected automatically.
-    """
-    _jobs[job_id]["status"] = "running"
-    try:
-        report = run_verify(proposal, baseline_rules=baseline_rules)
-        _s.verify_report = report
-        _jobs[job_id] = {
-            "status": "done",
-            "result": report.model_dump(),
-            "error": None,
-        }
-        # Auto-reject reward hacking per spec: "tolak otomatis, catat sebagai cheating attempt"
-        if report.verdict == VerifyVerdict.REWARD_HACKING:
-            _record_iteration(action="rejected")
-            _s.proposal = None
-            # Keep verify_report so the UI can display the red banner
-    except Exception as e:
-        _jobs[job_id] = {
-            "status": "error",
-            "result": None,
-            "error": str(e),
-        }
-
-
-# ── Request / Response helpers ─────────────────────────────────────────────────
+# ── Request models ─────────────────────────────────────────────────────────────
 
 class ReconcileRequest(BaseModel):
     split: str = "train"
-    rule_version: Optional[str] = None  # defaults to current
+    rule_version: Optional[str] = None
 
 class JudgeRequest(BaseModel):
     next_version: str = "v2"
 
 class ApproveRequest(BaseModel):
-    rule_version: Optional[str] = None  # defaults to last verify report's version
+    rule_version: Optional[str] = None
 
 class GreedyProposalRequest(BaseModel):
-    base_version: Optional[str] = None  # baseline to compare against
+    base_version: Optional[str] = None
 
-class IterationRecord(BaseModel):
-    iteration: int
-    rule_version: str
-    train_score: float
-    holdout_score: float
-    verdict: Optional[str] = None
-    action: str  # baseline | approved | rejected | pending
-    description: Optional[str] = None
+class CreateKeyRequest(BaseModel):
+    tenant_name: str
+    key_name: Optional[str] = None
+    admin_secret: str
 
 
-# ── Health / Status ─────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "current_rule_version": get_current_version()}
+def _rules_from_db(rv) -> RuleSet:
+    """Convert a DB RuleVersion row to a RuleSet schema object."""
+    c = rv.config
+    return RuleSet(
+        version=rv.version,
+        name_similarity_threshold=c.get("name_similarity_threshold", 0.95),
+        amount_tolerance_abs=c.get("amount_tolerance_abs", 2000.0),
+        amount_tolerance_pct=c.get("amount_tolerance_pct", 0.005),
+        date_tolerance_days=c.get("date_tolerance_days", 1),
+        min_confidence=c.get("min_confidence", 0.9),
+    )
 
 
-@app.get("/status")
-def status():
+def _rules_to_dict(rules: RuleSet) -> dict:
     return {
-        "current_rule_version": get_current_version(),
-        "has_reconcile_results": _s.reconcile_report is not None,
-        "has_proposal": _s.proposal is not None,
-        "has_verify_report": _s.verify_report is not None,
-        "iteration_count": len(_s.iteration_history),
+        "name_similarity_threshold": rules.name_similarity_threshold,
+        "amount_tolerance_abs": rules.amount_tolerance_abs,
+        "amount_tolerance_pct": rules.amount_tolerance_pct,
+        "date_tolerance_days": rules.date_tolerance_days,
+        "min_confidence": rules.min_confidence,
     }
 
 
-# ── Rules ───────────────────────────────────────────────────────────────────────
+async def _ensure_default_rules(db: AsyncSession, tenant_id: str) -> RuleSet:
+    """Make sure tenant has v0 and v1 rules; return current rules."""
+    current = await crud.get_current_rule_version(db, tenant_id)
+    if current:
+        return _rules_from_db(current)
+
+    # Seed defaults for new tenant
+    for version, rules in _DEFAULT_RULES.items():
+        await crud.upsert_rule_version(db, tenant_id, version, _rules_to_dict(rules))
+
+    await crud.set_current_rule_version(db, tenant_id, "v0")
+    current = await crud.get_current_rule_version(db, tenant_id)
+    return _rules_from_db(current)
+
+
+async def _get_current_rules_for_tenant(db: AsyncSession, tenant_id: str) -> RuleSet:
+    rules = await _ensure_default_rules(db, tenant_id)
+    return rules
+
+
+async def _record_iteration(db: AsyncSession, tenant_id: str, verify_report: VerifyReport, proposal: RuleProposal | None, action: str):
+    vr = verify_report
+    await crud.append_iteration(db, tenant_id, {
+        "iteration_num": None,  # crud sets the real num
+        "rule_version": vr.rule_version,
+        "train_score": round(vr.score_train, 4),
+        "holdout_score": round(vr.score_holdout, 4),
+        "baseline_train": round(vr.score_baseline_train, 4),
+        "baseline_holdout": round(vr.score_baseline_holdout, 4),
+        "delta_train": round(vr.delta_train, 4),
+        "delta_holdout": round(vr.delta_holdout, 4),
+        "verdict": vr.verdict.value,
+        "action": action,
+        "description": proposal.description if proposal else None,
+    })
+
+
+def _report_to_dict(vr: VerifyReport) -> dict:
+    return {
+        "rule_version": vr.rule_version,
+        "score_train": vr.score_train,
+        "score_holdout": vr.score_holdout,
+        "score_baseline_train": vr.score_baseline_train,
+        "score_baseline_holdout": vr.score_baseline_holdout,
+        "delta_train": vr.delta_train,
+        "delta_holdout": vr.delta_holdout,
+        "verdict": vr.verdict.value,
+        "explanation": vr.explanation,
+    }
+
+
+def _proposal_to_dict(p: RuleProposal) -> dict:
+    return {
+        "rule_version": p.rule_version,
+        "description": p.description,
+        "changes": p.changes,
+        "rationale": p.rationale,
+        "proposed_by": getattr(p, "proposed_by", "judge"),
+    }
+
+
+def _proposal_from_dict(d: dict) -> RuleProposal:
+    return RuleProposal(
+        rule_version=d["rule_version"],
+        description=d.get("description", ""),
+        changes=d.get("changes", []),
+        rationale=d.get("rationale", ""),
+        proposed_by=d.get("proposed_by", "judge"),
+    )
+
+
+def _verify_from_dict(d: dict) -> VerifyReport:
+    return VerifyReport(
+        rule_version=d["rule_version"],
+        score_train=d["score_train"],
+        score_holdout=d["score_holdout"],
+        score_baseline_train=d["score_baseline_train"],
+        score_baseline_holdout=d["score_baseline_holdout"],
+        delta_train=d["delta_train"],
+        delta_holdout=d["delta_holdout"],
+        verdict=VerifyVerdict(d["verdict"]),
+        explanation=d["explanation"],
+    )
+
+
+def _reconcile_to_dict(r: ReconcileReport) -> dict:
+    return {
+        "results": [
+            {
+                "payment_id": m.payment_id,
+                "decision": m.decision.value,
+                "matched_invoice_id": m.matched_invoice_id,
+                "confidence": m.confidence,
+                "rationale": m.rationale,
+            }
+            for m in r.results
+        ],
+        "accuracy": r.accuracy,
+        "total": r.total,
+        "correct": r.correct,
+        "rule_version": r.rule_version,
+    }
+
+
+# ── Background job runner ──────────────────────────────────────────────────────
+
+async def _run_verify_job(job_id: str, tenant_id: str, proposal: RuleProposal, baseline_rules: RuleSet):
+    from backend.db.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        try:
+            await crud.update_job(db, job_id, tenant_id, status="running")
+            report = await run_verify(proposal, baseline_rules)
+
+            report_dict = _report_to_dict(report)
+            await crud.save_verify_report(db, tenant_id, report_dict)
+
+            if report.verdict == VerifyVerdict.REWARD_HACKING:
+                proposal_row = await crud.get_latest_proposal(db, tenant_id)
+                p = _proposal_from_dict(proposal_row.proposal) if proposal_row else proposal
+                await _record_iteration(db, tenant_id, report, p, "rejected")
+                await crud.clear_proposal(db, tenant_id)
+                await crud.clear_verify_report(db, tenant_id)
+
+            await crud.update_job(db, job_id, tenant_id, status="done", result=report_dict)
+        except Exception as e:
+            await crud.update_job(db, job_id, tenant_id, status="error", error=str(e))
+
+
+# ── Admin: create tenant + API key ─────────────────────────────────────────────
+
+@app.post("/admin/keys")
+async def create_key(req: CreateKeyRequest, db: AsyncSession = Depends(get_db)):
+    """Create a new tenant + API key. Protected by admin_secret."""
+    if req.admin_secret != ADMIN_SECRET:
+        raise HTTPException(403, "Invalid admin secret.")
+    tenant = await crud.create_tenant(db, req.tenant_name)
+    raw_key, key_row = await crud.create_api_key(db, tenant.id, req.key_name)
+    return {
+        "tenant_id": tenant.id,
+        "tenant_name": tenant.name,
+        "api_key": raw_key,
+        "key_prefix": key_row.key_prefix,
+        "warning": "Save this API key — it will not be shown again.",
+    }
+
+
+@app.get("/admin/keys")
+async def list_keys(
+    admin_secret: str = Header(...),
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    if admin_secret != ADMIN_SECRET:
+        raise HTTPException(403, "Invalid admin secret.")
+    keys = await crud.list_api_keys(db, tenant.id)
+    return {"keys": [{"id": k.id, "prefix": k.key_prefix, "name": k.name, "active": k.is_active} for k in keys]}
+
+
+# ── Health & Status ────────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.get("/status")
+async def status(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    current = await crud.get_current_rule_version(db, tenant.id)
+    reconcile = await crud.get_latest_reconcile(db, tenant.id)
+    proposal = await crud.get_latest_proposal(db, tenant.id)
+    verify = await crud.get_latest_verify_report(db, tenant.id)
+    iterations = await crud.get_iterations(db, tenant.id)
+    return {
+        "tenant_id": tenant.id,
+        "tenant_name": tenant.name,
+        "current_rule_version": current.version if current else "v0",
+        "has_reconcile_results": reconcile is not None,
+        "has_proposal": proposal is not None,
+        "has_verify_report": verify is not None,
+        "iteration_count": len(iterations),
+    }
+
+
+# ── Upload ─────────────────────────────────────────────────────────────────────
+
+@app.post("/upload")
+async def upload_data(
+    payments_file: UploadFile = File(...),
+    invoices_file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    """Upload payments.csv and invoices.csv. Replaces previous upload for this tenant."""
+    def parse_csv(content: bytes) -> list[dict]:
+        text = content.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(text))
+        return [dict(row) for row in reader]
+
+    payments_bytes = await payments_file.read()
+    invoices_bytes = await invoices_file.read()
+
+    try:
+        payments = parse_csv(payments_bytes)
+        invoices = parse_csv(invoices_bytes)
+    except Exception as e:
+        raise HTTPException(400, f"CSV parse error: {e}")
+
+    if not payments:
+        raise HTTPException(400, "payments.csv is empty or invalid.")
+    if not invoices:
+        raise HTTPException(400, "invoices.csv is empty or invalid.")
+
+    await crud.save_upload(db, tenant.id, payments, invoices, {})
+    return {
+        "uploaded": True,
+        "payments": len(payments),
+        "invoices": len(invoices),
+        "note": "Ground truth not provided — accuracy scoring uses built-in dataset.",
+    }
+
+
+# ── Rules ──────────────────────────────────────────────────────────────────────
 
 @app.get("/rules")
-def get_all_rules():
+async def get_rules(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    await _ensure_default_rules(db, tenant.id)
+    versions = await crud.list_rule_versions(db, tenant.id)
+    current = await crud.get_current_rule_version(db, tenant.id)
     return {
-        "current_version": get_current_version(),
-        "versions": {v: get_rules(v).model_dump() for v in list_versions()},
+        "current_version": current.version if current else "v0",
+        "versions": {rv.version: {**rv.config, "version": rv.version} for rv in versions},
     }
 
 
 @app.get("/rules/current")
-def get_current_rule():
-    return get_current_rules().model_dump()
+async def get_current_rule(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    rules = await _get_current_rules_for_tenant(db, tenant.id)
+    return rules
 
 
-# ── Layer 1: Reconcile ──────────────────────────────────────────────────────────
+# ── Reconcile ──────────────────────────────────────────────────────────────────
 
-@app.post("/reconcile", response_model=ReconcileReport)
-def reconcile(req: ReconcileRequest):
-    """Run Layer 1: reconcile payments against invoices using Gemini."""
-    rules = get_rules(req.rule_version) if req.rule_version else get_current_rules()
-    payments = load_payments()
-    train_p, holdout_p = split_payments(payments)
-    batch = train_p if req.split == "train" else holdout_p
+@app.post("/reconcile")
+async def reconcile(
+    req: ReconcileRequest,
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    rules = await _get_current_rules_for_tenant(db, tenant.id)
+    if req.rule_version:
+        rv = await crud.get_rule_version(db, tenant.id, req.rule_version)
+        if not rv:
+            raise HTTPException(404, f"Rule version '{req.rule_version}' not found.")
+        rules = _rules_from_db(rv)
 
-    report = run_reconcile_batch(batch, split=req.split, rules=rules)
-    _s.reconcile_report = report
-    return report
+    payments, _ = split_payments(load_payments()) if req.split == "train" else (load_payments(), [])
+    if req.split == "holdout":
+        _, payments = split_payments(load_payments())
+
+    report = await run_reconcile_batch(payments, split=req.split, rules=rules)
+    report_dict = _reconcile_to_dict(report)
+    await crud.save_reconcile_result(db, tenant.id, {
+        "results": report_dict["results"],
+        "accuracy": report.accuracy,
+        "total": report.total,
+        "correct": report.correct,
+        "rule_version": report.rule_version,
+    })
+    return report_dict
 
 
 @app.get("/reconcile/latest")
-def get_latest_reconcile():
-    if not _s.reconcile_report:
-        raise HTTPException(404, "No reconcile results yet. POST /reconcile first.")
-    return _s.reconcile_report
+async def get_latest_reconcile(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    row = await crud.get_latest_reconcile(db, tenant.id)
+    if not row:
+        raise HTTPException(404, "No reconcile results yet.")
+    return {**row.results, "accuracy": row.accuracy, "total": row.total,
+            "correct": row.correct, "rule_version": row.rule_version}
 
 
-# ── Layer 2: Judge ──────────────────────────────────────────────────────────────
+@app.get("/reconcile/export")
+async def export_reconcile(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    """Download reconciliation results as CSV."""
+    row = await crud.get_latest_reconcile(db, tenant.id)
+    if not row:
+        raise HTTPException(404, "No reconcile results to export.")
 
-@app.post("/judge", response_model=RuleProposal)
-def judge(req: JudgeRequest):
-    """Run Layer 2: LLM judge diagnoses errors and proposes rule improvements."""
-    if not _s.reconcile_report:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["payment_id", "decision", "matched_invoice_id", "confidence", "rationale", "rule_version"])
+    for r in row.results:
+        writer.writerow([
+            r.get("payment_id", ""),
+            r.get("decision", ""),
+            r.get("matched_invoice_id", "") or "",
+            round(r.get("confidence", 0), 4),
+            r.get("rationale", ""),
+            row.rule_version or "",
+        ])
+
+    output.seek(0)
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode("utf-8")),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=reconciliation_{tenant.id[:8]}.csv"},
+    )
+
+
+# ── Judge ──────────────────────────────────────────────────────────────────────
+
+@app.post("/judge")
+async def judge(
+    req: JudgeRequest,
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    reconcile_row = await crud.get_latest_reconcile(db, tenant.id)
+    if not reconcile_row:
         raise HTTPException(400, "No reconcile results. POST /reconcile first.")
 
-    proposal = run_judge(
-        results=_s.reconcile_report.results,
-        current_rules=get_current_rules(),
-        next_version=req.next_version,
-    )
-    _s.proposal = proposal
-    return proposal
+    rules = await _get_current_rules_for_tenant(db, tenant.id)
+
+    results = [
+        MatchResult(
+            payment_id=r["payment_id"],
+            decision=MatchDecision(r["decision"]),
+            matched_invoice_id=r.get("matched_invoice_id"),
+            confidence=r["confidence"],
+            rationale=r["rationale"],
+        )
+        for r in reconcile_row.results
+    ]
+
+    proposal = await run_judge(results, rules, next_version=req.next_version)
+    proposal_dict = _proposal_to_dict(proposal)
+
+    await crud.save_proposal(db, tenant.id, proposal_dict)
+    await crud.upsert_rule_version(db, tenant.id, proposal.rule_version,
+                                    _rules_to_dict(apply_rule_proposal(proposal, rules.version)))
+    return proposal_dict
 
 
 @app.get("/judge/latest")
-def get_latest_proposal():
-    if not _s.proposal:
-        raise HTTPException(404, "No proposal yet. POST /judge first.")
-    return _s.proposal
+async def get_latest_judge(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    row = await crud.get_latest_proposal(db, tenant.id)
+    if not row:
+        raise HTTPException(404, "No proposal yet.")
+    return row.proposal
 
 
-# ── Layer 3: Verify ─────────────────────────────────────────────────────────────
+# ── Verify ─────────────────────────────────────────────────────────────────────
 
 @app.post("/verify")
-def verify():
-    """Run Layer 3: test proposal on holdout to detect reward hacking.
-
-    Returns immediately with a job_id. Poll GET /jobs/{job_id} for status.
-    Runs 4 Gemini batches (~60 calls) so must be async — a synchronous call would timeout.
-    REWARD_HACKING verdicts are auto-rejected and recorded per spec.
-    """
-    if not _s.proposal:
+async def verify(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    proposal_row = await crud.get_latest_proposal(db, tenant.id)
+    if not proposal_row:
         raise HTTPException(400, "No proposal. POST /judge first.")
 
-    baseline_rules = get_current_rules()
+    proposal = _proposal_from_dict(proposal_row.proposal)
+    baseline_rules = await _get_current_rules_for_tenant(db, tenant.id)
+
     job_id = uuid.uuid4().hex[:8]
-    _jobs[job_id] = {"status": "pending", "result": None, "error": None}
-
-    thread = threading.Thread(
-        target=_run_verify_job,
-        args=(job_id, _s.proposal, baseline_rules),
-        daemon=True,
-    )
-    thread.start()
-
-    return {
-        "job_id": job_id,
-        "status": "running",
-        "message": "Verification started. Poll GET /jobs/{job_id} for result.",
-    }
+    await crud.create_job(db, job_id, tenant.id)
+    asyncio.create_task(_run_verify_job(job_id, tenant.id, proposal, baseline_rules))
+    return {"job_id": job_id, "status": "running", "message": "Verification started. Poll GET /jobs/{job_id}."}
 
 
 @app.post("/verify/greedy")
-def verify_greedy(req: GreedyProposalRequest):
-    """Start a greedy (reward-hacking) verify job in the background.
+async def verify_greedy(
+    req: GreedyProposalRequest,
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    rules = await _get_current_rules_for_tenant(db, tenant.id)
+    base_version = req.base_version or rules.version
 
-    Returns immediately with a job_id. Poll GET /jobs/{job_id} for status.
-    This is the production-ready pattern for long-running Gemini operations.
-    """
-    base = get_rules(req.base_version) if req.base_version else get_current_rules()
     greedy_proposal = RuleProposal(
-        rule_version=f"{base.version}-greedy",
-        description="Greedy rules: remove all matching constraints to maximise match count",
-        changes=[
-            "name_similarity_threshold=0.0",
-            "amount_tolerance_abs=999999999.0",
-            "amount_tolerance_pct=1.0",
-            "date_tolerance_days=365",
-            "min_confidence=0.0",
-        ],
-        rationale="Aggressive matching — optimise for match count regardless of accuracy.",
-        proposed_by="system",
-    )
-    _s.proposal = greedy_proposal
-
-    job_id = uuid.uuid4().hex[:8]
-    _jobs[job_id] = {"status": "pending", "result": None, "error": None}
-
-    thread = threading.Thread(
-        target=_run_verify_job,
-        args=(job_id, greedy_proposal, base),
-        daemon=True,
-    )
-    thread.start()
-
-    return {
-        "job_id": job_id,
-        "status": "running",
-        "message": "Greedy verification started. Poll GET /jobs/{job_id} for result.",
-    }
-
-
-@app.get("/jobs/{job_id}")
-def get_job(job_id: str):
-    """Poll the status of a background verify job."""
-    job = _jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, f"Job '{job_id}' not found.")
-    return job
-
-
-@app.get("/verify/latest")
-def get_latest_verify():
-    if not _s.verify_report:
-        raise HTTPException(404, "No verify report yet. POST /verify first.")
-    return _s.verify_report
-
-
-# ── Approve / Reject ────────────────────────────────────────────────────────────
-
-@app.post("/approve")
-def approve(req: ApproveRequest):
-    """Human approval: activate the proposed rules as current version."""
-    if not _s.verify_report:
-        raise HTTPException(400, "No verify report. POST /verify first.")
-    if _s.verify_report.verdict != VerifyVerdict.GENUINE_IMPROVEMENT:
-        raise HTTPException(400, f"Cannot approve: verdict is {_s.verify_report.verdict.value}")
-
-    version = req.rule_version or _s.verify_report.rule_version
-    try:
-        set_current_version(version)
-    except ValueError:
-        raise HTTPException(404, f"Rule version '{version}' not registered.")
-
-    _record_iteration(action="approved")
-    _s.proposal = None
-    _s.verify_report = None
-    return {"approved": True, "active_version": get_current_version()}
-
-
-@app.post("/reject")
-def reject():
-    """Human rejection: discard proposal, keep current rules."""
-    if not _s.verify_report and not _s.proposal:
-        raise HTTPException(400, "Nothing to reject.")
-
-    _record_iteration(action="rejected")
-    _s.proposal = None
-    _s.verify_report = None
-    return {"rejected": True, "active_version": get_current_version()}
-
-
-@app.post("/rollback/{version}")
-def rollback(version: str):
-    """Roll back to any previously registered rule version."""
-    try:
-        set_current_version(version)
-    except ValueError:
-        raise HTTPException(404, f"Version '{version}' not found.")
-    return {"rolled_back_to": version}
-
-
-# ── History ─────────────────────────────────────────────────────────────────────
-
-@app.get("/history")
-def get_history():
-    return {"iterations": _s.iteration_history}
-
-
-@app.post("/history/reset")
-def reset_history():
-    _s.iteration_history.clear()
-    _s.reconcile_report = None
-    _s.proposal = None
-    _s.verify_report = None
-    return {"reset": True}
-
-
-# ── Demo Seed (instant demo without Gemini calls) ────────────────────────────────
-
-@app.post("/demo/seed")
-def demo_seed():
-    """Load pre-computed demo results for instant video demo — no Gemini calls needed.
-
-    Seeds the full 3-layer pipeline state with real results from test runs:
-    - ReconcileTable: v0 baseline, 16/20 = 80% train accuracy
-    - RuleProposalCard: sensible v1-style rule relaxation
-    - VerificationGate: GENUINE_IMPROVEMENT (holdout 90%→100%)
-    - History: 2 iterations (genuine approved + hacking rejected)
-    """
-    from backend.models.schemas import MatchResult, MatchDecision
-
-    # ── Seed reconcile results (v0 baseline, 16/20 = 80%) ──
-    _s.reconcile_report = ReconcileReport(
-        results=[
-            MatchResult(payment_id="PAY001", decision=MatchDecision.MATCHED, matched_invoice_id="INV001", confidence=1.0, rationale="Exact name and amount match."),
-            MatchResult(payment_id="PAY002", decision=MatchDecision.MATCHED, matched_invoice_id="INV002", confidence=1.0, rationale="Exact match on all fields."),
-            MatchResult(payment_id="PAY003", decision=MatchDecision.MATCHED, matched_invoice_id="INV003", confidence=1.0, rationale="Exact name and amount match."),
-            MatchResult(payment_id="PAY004", decision=MatchDecision.MATCHED, matched_invoice_id="INV004", confidence=1.0, rationale="Exact match."),
-            MatchResult(payment_id="PAY005", decision=MatchDecision.UNMATCHED, matched_invoice_id=None, confidence=0.95, rationale="No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."),
-            MatchResult(payment_id="PAY006", decision=MatchDecision.UNMATCHED, matched_invoice_id=None, confidence=0.95, rationale="No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."),
-            MatchResult(payment_id="PAY007", decision=MatchDecision.UNMATCHED, matched_invoice_id=None, confidence=0.95, rationale="No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."),
-            MatchResult(payment_id="PAY008", decision=MatchDecision.UNMATCHED, matched_invoice_id=None, confidence=0.95, rationale="No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."),
-            MatchResult(payment_id="PAY009", decision=MatchDecision.MATCHED, matched_invoice_id="INV009", confidence=1.0, rationale="Name exact match. Small fee deduction within tolerance."),
-            MatchResult(payment_id="PAY010", decision=MatchDecision.MATCHED, matched_invoice_id="INV010", confidence=0.98, rationale="Name match. Amount differs by Rp 6,500 (bank fee deduction)."),
-            MatchResult(payment_id="PAY011", decision=MatchDecision.MATCHED, matched_invoice_id="INV011", confidence=1.0, rationale="Name and amount exact. Date 2 days apart within tolerance."),
-            MatchResult(payment_id="PAY012", decision=MatchDecision.MATCHED, matched_invoice_id="INV012", confidence=0.98, rationale="Exact match on name and amount."),
-            MatchResult(payment_id="PAY013", decision=MatchDecision.MATCHED, matched_invoice_id="INV013A+INV013B", confidence=0.98, rationale="Split payment: INV013A (5M) + INV013B (3.5M) = 8.5M total."),
-            MatchResult(payment_id="PAY014", decision=MatchDecision.MATCHED, matched_invoice_id="INV014A+INV014B", confidence=0.98, rationale="Split payment: INV014A + INV014B matches total."),
-            MatchResult(payment_id="PAY015", decision=MatchDecision.MATCHED, matched_invoice_id="INV015", confidence=1.0, rationale="Exact match on all fields."),
-            MatchResult(payment_id="PAY016", decision=MatchDecision.MATCHED, matched_invoice_id="INV016", confidence=0.98, rationale="Name and amount match. Correct vendor despite duplicate amount."),
-            MatchResult(payment_id="PAY017", decision=MatchDecision.MATCHED, matched_invoice_id="INV017", confidence=1.0, rationale="Exact match on all fields."),
-            MatchResult(payment_id="PAY018", decision=MatchDecision.MATCHED, matched_invoice_id="INV018", confidence=1.0, rationale="Exact match on all fields."),
-            MatchResult(payment_id="PAY019", decision=MatchDecision.UNMATCHED, matched_invoice_id=None, confidence=0.95, rationale="No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."),
-            MatchResult(payment_id="PAY020", decision=MatchDecision.UNMATCHED, matched_invoice_id=None, confidence=0.95, rationale="No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."),
-        ],
-        accuracy=0.80,
-        total=20,
-        correct=16,
-        rule_version="v0",
-    )
-
-    # ── Seed rule proposal (judge recommends v1-style) ──
-    _s.proposal = RuleProposal(
-        rule_version="v1-proposed",
-        description="Relax name similarity and tolerances to handle vendor name variants and bank fee deductions",
-        changes=[
-            "name_similarity_threshold=0.7",
-            "amount_tolerance_abs=10000.0",
-            "date_tolerance_days=5",
-            "min_confidence=0.6",
-        ],
-        rationale=(
-            "4 payments (PAY005–PAY008) were auto-rejected because their payer names "
-            "('PT Global Tekno', 'Maju Jaya Sejahtera', etc.) fell below the 0.95 "
-            "similarity threshold, even though they clearly map to the correct invoices. "
-            "Relaxing to 0.7 captures these legitimate variants while maintaining precision."
-        ),
-        proposed_by="judge",
-    )
-
-    # ── Seed verify report (GENUINE IMPROVEMENT) ──
-    _s.verify_report = VerifyReport(
-        rule_version="v1-proposed",
-        score_train=1.0,
-        score_holdout=1.0,
-        score_baseline_train=0.80,
-        score_baseline_holdout=0.90,
-        delta_train=0.20,
-        delta_holdout=0.10,
-        verdict=VerifyVerdict.GENUINE_IMPROVEMENT,
-        explanation=(
-            "Holdout accuracy improved by +10.0% (90.0% → 100.0%). "
-            "Rule changes generalise to unseen data. Recommend human approval."
-        ),
-    )
-
-    # ── Register v1-proposed in rules registry ──
-    from backend.agent.rules import apply_rule_proposal, register_rules
-    new_rules = apply_rule_proposal(_s.proposal, base_version="v0")
-    register_rules(new_rules)
-
-    # ── Pre-load iteration history with both scenarios ──
-    _s.iteration_history = [
-        {
-            "iteration": 1,
-            "rule_version": "v1-proposed",
-            "train_score": 1.0,
-            "holdout_score": 1.0,
-            "baseline_train": 0.80,
-            "baseline_holdout": 0.90,
-            "delta_train": 0.20,
-            "delta_holdout": 0.10,
-            "verdict": "GENUINE_IMPROVEMENT",
-            "action": "approved",
-            "description": "Relax name similarity and tolerances — genuine improvement",
-        },
-        {
-            "iteration": 2,
-            "rule_version": "v1-greedy",
-            "train_score": 0.90,
-            "holdout_score": 0.90,
-            "baseline_train": 1.0,
-            "baseline_holdout": 1.0,
-            "delta_train": -0.10,
-            "delta_holdout": -0.10,
-            "verdict": "REWARD_HACKING",
-            "action": "rejected",
-            "description": "Greedy attack: remove all constraints to maximise match count",
-        },
-    ]
-
-    return {
-        "seeded": True,
-        "reconcile": "16/20 = 80% (v0 baseline)",
-        "proposal": "v1-style rule relaxation",
-        "verify": "GENUINE_IMPROVEMENT (+10% holdout)",
-        "history": "2 iterations pre-loaded (genuine approved + hacking rejected)",
-        "tip": "Click 'Demo: Greedy Attack' on the dashboard to trigger the REWARD HACKING banner.",
-    }
-
-
-@app.post("/demo/seed-hacking")
-def demo_seed_hacking():
-    """Seed the verify report with REWARD_HACKING result — triggers the red banner."""
-    _s.verify_report = VerifyReport(
-        rule_version="v1-greedy",
-        score_train=0.90,
-        score_holdout=0.90,
-        score_baseline_train=1.0,
-        score_baseline_holdout=1.0,
-        delta_train=-0.10,
-        delta_holdout=-0.10,
-        verdict=VerifyVerdict.REWARD_HACKING,
-        explanation=(
-            "REWARD HACKING DETECTED: Rules degraded both splits — "
-            "train -10.0%, holdout -10.0% (100.0% → 90.0%). "
-            "Rules optimise for training data at the expense of generalisation — proposal auto-rejected."
-        ),
-    )
-    _s.proposal = RuleProposal(
-        rule_version="v1-greedy",
+        rule_version=f"{base_version}-greedy",
         description="Remove all matching constraints to maximise match count",
         changes=[
             "name_similarity_threshold=0.0",
@@ -494,47 +508,260 @@ def demo_seed_hacking():
         rationale="Aggressive matching — optimise for match count regardless of accuracy.",
         proposed_by="demo",
     )
-    return {"seeded": True, "verdict": "REWARD_HACKING", "tip": "Refresh dashboard to see the red banner."}
+
+    job_id = uuid.uuid4().hex[:8]
+    await crud.create_job(db, job_id, tenant.id)
+    asyncio.create_task(_run_verify_job(job_id, tenant.id, greedy_proposal, rules))
+    return {"job_id": job_id, "status": "running", "message": "Greedy attack started. Poll GET /jobs/{job_id}."}
 
 
-# ── Helper ───────────────────────────────────────────────────────────────────────
+@app.get("/jobs/{job_id}")
+async def get_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    job = await crud.get_job(db, job_id, tenant.id)
+    if not job:
+        raise HTTPException(404, f"Job '{job_id}' not found.")
+    return {"status": job.status, "result": job.result, "error": job.error}
 
-def _record_iteration(action: str):
-    """Snapshot current verify report into iteration history."""
-    if not _s.verify_report:
-        return
-    vr = _s.verify_report
-    _s.iteration_history.append({
-        "iteration": len(_s.iteration_history) + 1,
-        "rule_version": vr.rule_version,
-        "train_score": round(vr.score_train, 4),
-        "holdout_score": round(vr.score_holdout, 4),
-        "baseline_train": round(vr.score_baseline_train, 4),
-        "baseline_holdout": round(vr.score_baseline_holdout, 4),
-        "delta_train": round(vr.delta_train, 4),
-        "delta_holdout": round(vr.delta_holdout, 4),
-        "verdict": vr.verdict.value,
-        "action": action,
-        "description": _s.proposal.description if _s.proposal else None,
+
+@app.get("/verify/latest")
+async def get_latest_verify(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    row = await crud.get_latest_verify_report(db, tenant.id)
+    if not row:
+        raise HTTPException(404, "No verify report yet.")
+    return row.report
+
+
+# ── Approve / Reject / Rollback ────────────────────────────────────────────────
+
+@app.post("/approve")
+async def approve(
+    req: ApproveRequest,
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    verify_row = await crud.get_latest_verify_report(db, tenant.id)
+    if not verify_row:
+        raise HTTPException(400, "No verify report. POST /verify first.")
+
+    report = _verify_from_dict(verify_row.report)
+    if report.verdict != VerifyVerdict.GENUINE_IMPROVEMENT:
+        raise HTTPException(400, f"Cannot approve: verdict is {report.verdict.value}")
+
+    version = req.rule_version or report.rule_version
+    rv = await crud.get_rule_version(db, tenant.id, version)
+    if not rv:
+        raise HTTPException(404, f"Rule version '{version}' not registered.")
+
+    await crud.set_current_rule_version(db, tenant.id, version)
+
+    proposal_row = await crud.get_latest_proposal(db, tenant.id)
+    p = _proposal_from_dict(proposal_row.proposal) if proposal_row else None
+    await _record_iteration(db, tenant.id, report, p, "approved")
+
+    await crud.clear_proposal(db, tenant.id)
+    await crud.clear_verify_report(db, tenant.id)
+
+    current = await crud.get_current_rule_version(db, tenant.id)
+    return {"approved": True, "active_version": current.version}
+
+
+@app.post("/reject")
+async def reject(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    verify_row = await crud.get_latest_verify_report(db, tenant.id)
+    if not verify_row:
+        raise HTTPException(400, "No verify report to reject.")
+    report = _verify_from_dict(verify_row.report)
+    proposal_row = await crud.get_latest_proposal(db, tenant.id)
+    p = _proposal_from_dict(proposal_row.proposal) if proposal_row else None
+    await _record_iteration(db, tenant.id, report, p, "rejected")
+    await crud.clear_proposal(db, tenant.id)
+    await crud.clear_verify_report(db, tenant.id)
+    return {"rejected": True}
+
+
+@app.post("/rollback/{version}")
+async def rollback(
+    version: str,
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    rv = await crud.get_rule_version(db, tenant.id, version)
+    if not rv:
+        raise HTTPException(404, f"Version '{version}' not found.")
+    await crud.set_current_rule_version(db, tenant.id, version)
+    return {"rolled_back_to": version}
+
+
+# ── History ────────────────────────────────────────────────────────────────────
+
+@app.get("/history")
+async def get_history(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    rows = await crud.get_iterations(db, tenant.id)
+    return {"iterations": [r.data for r in rows]}
+
+
+@app.post("/history/reset")
+async def reset_history(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    await crud.clear_iterations(db, tenant.id)
+    await crud.clear_proposal(db, tenant.id)
+    await crud.clear_verify_report(db, tenant.id)
+    versions = await crud.list_rule_versions(db, tenant.id)
+    for v in versions:
+        if v.version not in ("v0", "v1", "v_greedy"):
+            from sqlalchemy import delete
+            from backend.db.models import RuleVersion
+            async with (await get_db().__anext__()) as s:
+                await s.execute(delete(RuleVersion).where(RuleVersion.id == v.id))
+                await s.commit()
+    await crud.set_current_rule_version(db, tenant.id, "v0")
+    return {"reset": True}
+
+
+# ── Demo Seed ──────────────────────────────────────────────────────────────────
+
+@app.post("/demo/seed")
+async def demo_seed(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    """Instantly seed full 3-layer demo state — no Gemini calls."""
+    await _ensure_default_rules(db, tenant.id)
+
+    reconcile_results = [
+        {"payment_id": "PAY001", "decision": "matched", "matched_invoice_id": "INV001", "confidence": 1.0, "rationale": "Exact name and amount match."},
+        {"payment_id": "PAY002", "decision": "matched", "matched_invoice_id": "INV002", "confidence": 1.0, "rationale": "Exact match on all fields."},
+        {"payment_id": "PAY003", "decision": "matched", "matched_invoice_id": "INV003", "confidence": 1.0, "rationale": "Exact name and amount match."},
+        {"payment_id": "PAY004", "decision": "matched", "matched_invoice_id": "INV004", "confidence": 1.0, "rationale": "Exact match."},
+        {"payment_id": "PAY005", "decision": "unmatched", "matched_invoice_id": None, "confidence": 0.95, "rationale": "No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."},
+        {"payment_id": "PAY006", "decision": "unmatched", "matched_invoice_id": None, "confidence": 0.95, "rationale": "No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."},
+        {"payment_id": "PAY007", "decision": "unmatched", "matched_invoice_id": None, "confidence": 0.95, "rationale": "No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."},
+        {"payment_id": "PAY008", "decision": "unmatched", "matched_invoice_id": None, "confidence": 0.95, "rationale": "No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."},
+        {"payment_id": "PAY009", "decision": "matched", "matched_invoice_id": "INV009", "confidence": 1.0, "rationale": "Name exact match. Small fee deduction within tolerance."},
+        {"payment_id": "PAY010", "decision": "matched", "matched_invoice_id": "INV010", "confidence": 0.98, "rationale": "Name match. Amount differs by Rp 6,500 (bank fee deduction)."},
+        {"payment_id": "PAY011", "decision": "matched", "matched_invoice_id": "INV011", "confidence": 1.0, "rationale": "Name and amount exact. Date 2 days apart within tolerance."},
+        {"payment_id": "PAY012", "decision": "matched", "matched_invoice_id": "INV012", "confidence": 0.98, "rationale": "Exact match on name and amount."},
+        {"payment_id": "PAY013", "decision": "matched", "matched_invoice_id": "INV013A+INV013B", "confidence": 0.98, "rationale": "Split payment: INV013A (5M) + INV013B (3.5M) = 8.5M total."},
+        {"payment_id": "PAY014", "decision": "matched", "matched_invoice_id": "INV014A+INV014B", "confidence": 0.98, "rationale": "Split payment: INV014A + INV014B matches total."},
+        {"payment_id": "PAY015", "decision": "matched", "matched_invoice_id": "INV015", "confidence": 1.0, "rationale": "Exact match on all fields."},
+        {"payment_id": "PAY016", "decision": "matched", "matched_invoice_id": "INV016", "confidence": 0.98, "rationale": "Name and amount match. Correct vendor despite duplicate amount."},
+        {"payment_id": "PAY017", "decision": "matched", "matched_invoice_id": "INV017", "confidence": 1.0, "rationale": "Exact match on all fields."},
+        {"payment_id": "PAY018", "decision": "matched", "matched_invoice_id": "INV018", "confidence": 1.0, "rationale": "Exact match on all fields."},
+        {"payment_id": "PAY019", "decision": "unmatched", "matched_invoice_id": None, "confidence": 0.95, "rationale": "No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."},
+        {"payment_id": "PAY020", "decision": "unmatched", "matched_invoice_id": None, "confidence": 0.95, "rationale": "No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."},
+    ]
+
+    await crud.save_reconcile_result(db, tenant.id, {
+        "results": reconcile_results, "accuracy": 0.80, "total": 20, "correct": 16, "rule_version": "v0",
     })
 
+    proposal_dict = {
+        "rule_version": "v1-proposed",
+        "description": "Relax name similarity and tolerances to handle vendor name variants and bank fee deductions",
+        "changes": ["name_similarity_threshold=0.7", "amount_tolerance_abs=10000.0", "date_tolerance_days=5", "min_confidence=0.6"],
+        "rationale": "4 payments (PAY005–PAY008) were auto-rejected because their payer names fell below the 0.95 similarity threshold.",
+        "proposed_by": "judge",
+    }
+    await crud.save_proposal(db, tenant.id, proposal_dict)
 
-# ── Production root app (serves frontend + API under /api) ───────────────────────
-# In local dev: `uvicorn backend.main:app` (port 8000) + Vite proxy handles /api.
-# In Cloud Run: `uvicorn backend.main:_root` — single container, one URL.
+    proposal = _proposal_from_dict(proposal_dict)
+    v1_rules = apply_rule_proposal(proposal, base_version="v0")
+    await crud.upsert_rule_version(db, tenant.id, "v1-proposed", _rules_to_dict(v1_rules))
+
+    verify_dict = {
+        "rule_version": "v1-proposed",
+        "score_train": 1.0, "score_holdout": 1.0,
+        "score_baseline_train": 0.80, "score_baseline_holdout": 0.90,
+        "delta_train": 0.20, "delta_holdout": 0.10,
+        "verdict": "GENUINE_IMPROVEMENT",
+        "explanation": "Holdout accuracy improved by +10.0% (90.0% → 100.0%). Rule changes generalise to unseen data. Recommend human approval.",
+    }
+    await crud.save_verify_report(db, tenant.id, verify_dict)
+
+    await crud.clear_iterations(db, tenant.id)
+    vr = _verify_from_dict(verify_dict)
+    await _record_iteration(db, tenant.id, vr, proposal, "approved")
+
+    hacking_vr = VerifyReport(
+        rule_version="v1-greedy", score_train=0.90, score_holdout=0.90,
+        score_baseline_train=1.0, score_baseline_holdout=1.0,
+        delta_train=-0.10, delta_holdout=-0.10,
+        verdict=VerifyVerdict.REWARD_HACKING,
+        explanation="REWARD HACKING DETECTED: Rules degraded both splits — train -10.0%, holdout -10.0%.",
+    )
+    greedy_p = RuleProposal(rule_version="v1-greedy", description="Greedy attack: remove all constraints", changes=[], rationale="")
+    await _record_iteration(db, tenant.id, hacking_vr, greedy_p, "rejected")
+
+    return {
+        "seeded": True,
+        "reconcile": "16/20 = 80% (v0 baseline)",
+        "proposal": "v1-style rule relaxation",
+        "verify": "GENUINE_IMPROVEMENT (+10% holdout)",
+        "history": "2 iterations pre-loaded",
+    }
+
+
+@app.post("/demo/seed-hacking")
+async def demo_seed_hacking(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    verify_dict = {
+        "rule_version": "v1-greedy",
+        "score_train": 0.90, "score_holdout": 0.90,
+        "score_baseline_train": 1.0, "score_baseline_holdout": 1.0,
+        "delta_train": -0.10, "delta_holdout": -0.10,
+        "verdict": "REWARD_HACKING",
+        "explanation": "REWARD HACKING DETECTED: Rules degraded both splits — train -10.0%, holdout -10.0% (100.0% → 90.0%). Proposal auto-rejected.",
+    }
+    await crud.save_verify_report(db, tenant.id, verify_dict)
+
+    proposal_dict = {
+        "rule_version": "v1-greedy",
+        "description": "Remove all matching constraints to maximise match count",
+        "changes": ["name_similarity_threshold=0.0", "amount_tolerance_abs=999999999.0", "date_tolerance_days=365", "min_confidence=0.0"],
+        "rationale": "Aggressive matching.",
+        "proposed_by": "demo",
+    }
+    await crud.save_proposal(db, tenant.id, proposal_dict)
+    return {"seeded": True, "verdict": "REWARD_HACKING"}
+
+
+# ── Production root app (frontend + API at /api) ───────────────────────────────
 
 import os as _os
-from fastapi.staticfiles import StaticFiles as _StaticFiles
 
 _root = FastAPI(title="HonestLedger")
-_root.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+_root.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@_root.on_event("startup")
+async def _root_startup():
+    """Lifecycle events on mounted sub-apps don't fire — must attach to root app."""
+    await init_db()
+    try:
+        setup_phoenix_tracing()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Phoenix tracing skipped: {e}")
+
+
 _root.mount("/api", app)
 
 _frontend_dist = _os.path.join(_os.path.dirname(__file__), "..", "frontend", "dist")
 if _os.path.exists(_frontend_dist):
-    _root.mount("/", _StaticFiles(directory=_frontend_dist, html=True), name="frontend")
+    _root.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="frontend")

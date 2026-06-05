@@ -5,6 +5,8 @@ from backend.models.schemas import RuleSet
 # Global rule registry
 # v0: overly strict — causes uncertain/wrong decisions on edge cases (demo baseline)
 # v1: sensible defaults — the "genuine improvement" target
+_RULE_REGISTRY = None  # alias used by main.py import check
+
 _RULES: dict[str, RuleSet] = {
     "v0": RuleSet(
         version="v0",
@@ -82,3 +84,7 @@ def set_current_version(version: str) -> None:
 
 def list_versions() -> list[str]:
     return list(_RULES.keys())
+
+
+# Exported for main.py to seed default rules into DB per tenant
+_DEFAULT_RULES: dict[str, RuleSet] = _RULES

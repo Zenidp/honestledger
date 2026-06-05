@@ -61,6 +61,8 @@ export interface IterationRecord {
 }
 
 export interface AppStatus {
+  tenant_id?: string
+  tenant_name?: string
   current_rule_version: string
   has_reconcile_results: boolean
   has_proposal: boolean

@@ -1,8 +1,8 @@
-"""Layer 1: Reconciliation agent — matches payments to invoices using Gemini."""
+"""Layer 1: Reconciliation agent — matches payments to invoices using Gemini (async)."""
 
+import asyncio
 import json
 import re
-import time
 from difflib import SequenceMatcher
 from backend.config import get_gemini_client, GEMINI_MODEL
 from backend.models.schemas import MatchResult, MatchDecision, ReconcileReport, RuleSet
@@ -10,7 +10,6 @@ from backend.agent.prompts import RECONCILE_SYSTEM, RECONCILE_USER
 from backend.agent.rules import get_current_rules, get_current_version
 from backend.data.loader import load_invoices, score_results
 
-# Aggressive match mode: when min_confidence <= this value, force Gemini to match anything plausible
 _AGGRESSIVE_THRESHOLD = 0.05
 
 _AGGRESSIVE_MODE_INSTRUCTION = """
@@ -24,15 +23,9 @@ All filtering rules are disabled. You MUST find a match for every payment.
 
 
 def _filter_candidate_invoices(payment, invoices: list, rules: RuleSet) -> list:
-    """Hard-enforce name similarity threshold before calling Gemini.
-
-    Returns invoices whose vendor_name is similar enough to the payer_name.
-    With name_similarity_threshold=0.0 (greedy), all invoices pass.
-    """
     threshold = rules.name_similarity_threshold
     if threshold <= 0.0:
-        return invoices  # greedy: all candidates pass
-
+        return invoices
     candidates = []
     payer = payment.payer_name.lower().strip()
     for inv in invoices:
@@ -46,16 +39,12 @@ def _filter_candidate_invoices(payment, invoices: list, rules: RuleSet) -> list:
 def _format_invoices(invoices) -> str:
     lines = []
     for inv in invoices:
-        lines.append(
-            f"  [{inv.id}] {inv.vendor_name} | Rp {inv.amount:,.0f} | {inv.date} | {inv.invoice_number}"
-        )
+        lines.append(f"  [{inv.id}] {inv.vendor_name} | Rp {inv.amount:,.0f} | {inv.date} | {inv.invoice_number}")
     return "\n".join(lines)
 
 
 def _parse_response(payment_id: str, raw: str) -> MatchResult:
-    """Parse Gemini JSON response into MatchResult, with fallback."""
     try:
-        # Strip markdown code fences if present
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()
         data = json.loads(clean)
         return MatchResult(
@@ -75,12 +64,11 @@ def _parse_response(payment_id: str, raw: str) -> MatchResult:
         )
 
 
-def reconcile_payment(payment, invoices, rules: RuleSet = None) -> MatchResult:
-    """Run Gemini to reconcile a single payment against filtered invoice candidates."""
+async def reconcile_payment(payment, invoices, rules: RuleSet = None) -> MatchResult:
+    """Async: reconcile a single payment against filtered invoice candidates via Gemini."""
     if rules is None:
         rules = get_current_rules()
 
-    # Hard-enforce name similarity: filter invoices before calling Gemini
     candidates = _filter_candidate_invoices(payment, invoices, rules)
     if not candidates:
         return MatchResult(
@@ -115,38 +103,33 @@ def reconcile_payment(payment, invoices, rules: RuleSet = None) -> MatchResult:
         f"  min_confidence            = {rules.min_confidence}"
     )
     system_prompt = RECONCILE_SYSTEM.format(rules_text=rules_text)
-
-    # Aggressive mode: when min_confidence=0.0, instruct Gemini to force matches
     if rules.min_confidence <= _AGGRESSIVE_THRESHOLD:
         system_prompt += _AGGRESSIVE_MODE_INSTRUCTION
 
-    import httpx
-
     for attempt in range(4):
         try:
-            response = client.models.generate_content(
+            response = await client.aio.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
                     temperature=0.0,
-                    # Disable extended thinking — reconcile needs fast structured output
                     thinking_config=types.ThinkingConfig(thinking_budget=0),
                 ),
             )
             return _parse_response(payment.id, response.text)
         except ClientError as e:
             if "429" in str(e) and attempt < 3:
-                wait = 15 * (2 ** attempt)  # 15s, 30s, 60s
+                wait = 15 * (2 ** attempt)
                 print(f"    Rate limit hit, waiting {wait}s...", flush=True)
-                time.sleep(wait)
+                await asyncio.sleep(wait)
             else:
                 raise
-        except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+        except Exception as e:
             if attempt < 3:
-                wait = 10 * (2 ** attempt)  # 10s, 20s, 40s
+                wait = 10 * (2 ** attempt)
                 print(f"    Connection error ({type(e).__name__}), retry {attempt+1}/3 in {wait}s...", flush=True)
-                time.sleep(wait)
+                await asyncio.sleep(wait)
             else:
                 return MatchResult(
                     payment_id=payment.id,
@@ -157,8 +140,8 @@ def reconcile_payment(payment, invoices, rules: RuleSet = None) -> MatchResult:
                 )
 
 
-def run_reconcile_batch(payments, split: str = "train", rules: RuleSet = None) -> ReconcileReport:
-    """Reconcile a list of payments and return a scored report."""
+async def run_reconcile_batch(payments, split: str = "train", rules: RuleSet = None) -> ReconcileReport:
+    """Async: reconcile a list of payments and return a scored report."""
     if rules is None:
         rules = get_current_rules()
 
@@ -167,10 +150,10 @@ def run_reconcile_batch(payments, split: str = "train", rules: RuleSet = None) -
 
     print(f"  Reconciling {len(payments)} payments (split={split})...", flush=True)
     for i, payment in enumerate(payments, 1):
-        result = reconcile_payment(payment, invoices, rules)
+        result = await reconcile_payment(payment, invoices, rules)
         results.append(result)
         if i < len(payments):
-            time.sleep(4)  # avoid rate limiting
+            await asyncio.sleep(4)
         status = "✓" if result.decision != MatchDecision.UNCERTAIN else "?"
         print(f"    [{i:02d}/{len(payments)}] {payment.id} → {result.decision.value} "
               f"(conf={result.confidence:.2f}) {status}", flush=True)

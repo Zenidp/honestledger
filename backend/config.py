@@ -6,41 +6,36 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# WSL fix: IPv6 connectivity to googleapis.com is broken — SSL handshake hangs
-# and token-refresh keep-alive connections get RST by the peer.
-# Three-layer patch so every outbound connection uses IPv4:
-#   1. socket.getaddrinfo  — used by httpx/httpcore (Gemini SDK)
-#   2. socket.create_connection — used directly by urllib3/requests (auth refresh)
-#   3. urllib3 HAS_IPV6 flag — prevents urllib3 from queuing IPv6 candidates
+# WSL fix: IPv6 connectivity to googleapis.com is broken in WSL2.
+# Only apply in local dev (WSL), not in Cloud Run where IPv6 works fine.
+if os.getenv("WSL_DISTRO_NAME") or os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop"):
+    _orig_getaddrinfo = socket.getaddrinfo
+    def _ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+    socket.getaddrinfo = _ipv4_only
 
-_orig_getaddrinfo = socket.getaddrinfo
-def _ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
-    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-socket.getaddrinfo = _ipv4_only
-
-_orig_create_connection = socket.create_connection
-def _ipv4_create_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
-    host, port = address
-    addrs = _orig_getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
-    if addrs:
-        host = addrs[0][4][0]
-    return _orig_create_connection((host, port), timeout, source_address)
-socket.create_connection = _ipv4_create_connection
-
-try:
-    import urllib3.util.connection as _u3conn
-    _u3conn.HAS_IPV6 = False
-    # Also patch urllib3's create_connection directly
-    _orig_u3_create = _u3conn.create_connection
-    def _u3_ipv4_create(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, socket_options=None):
+    _orig_create_connection = socket.create_connection
+    def _ipv4_create_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
         host, port = address
         addrs = _orig_getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
         if addrs:
             host = addrs[0][4][0]
-        return _orig_u3_create((host, port), timeout, source_address, socket_options)
-    _u3conn.create_connection = _u3_ipv4_create
-except Exception:
-    pass
+        return _orig_create_connection((host, port), timeout, source_address)
+    socket.create_connection = _ipv4_create_connection
+
+    try:
+        import urllib3.util.connection as _u3conn
+        _u3conn.HAS_IPV6 = False
+        _orig_u3_create = _u3conn.create_connection
+        def _u3_ipv4_create(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, socket_options=None):
+            host, port = address
+            addrs = _orig_getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+            if addrs:
+                host = addrs[0][4][0]
+            return _orig_u3_create((host, port), timeout, source_address, socket_options)
+        _u3conn.create_connection = _u3_ipv4_create
+    except Exception:
+        pass
 
 # Load .env from project root (works whether we run from root or backend/)
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -51,6 +46,9 @@ GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 PHOENIX_API_KEY: str = os.environ["PHOENIX_API_KEY"]
 PHOENIX_COLLECTOR_ENDPOINT: str = os.environ["PHOENIX_COLLECTOR_ENDPOINT"]
+
+DATABASE_URL: str = os.environ["DATABASE_URL"]
+ADMIN_SECRET: str = os.getenv("ADMIN_SECRET", "changeme")
 
 
 _gemini_client = None

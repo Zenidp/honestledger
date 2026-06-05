@@ -4,7 +4,20 @@ import type {
   AppStatus, IterationRecord, RuleSet
 } from './types'
 
+// API key stored in localStorage — sent as X-API-Key header on every request
+const getApiKey = () => localStorage.getItem('hl_api_key') || ''
+
 const api = axios.create({ baseURL: '/api' })
+
+api.interceptors.request.use(config => {
+  const key = getApiKey()
+  if (key) config.headers['X-API-Key'] = key
+  return config
+})
+
+export const setApiKey = (key: string) => localStorage.setItem('hl_api_key', key)
+export const clearApiKey = () => localStorage.removeItem('hl_api_key')
+export const hasApiKey = () => !!getApiKey()
 
 export const getHealth = () => api.get('/health')
 export const getStatus = (): Promise<AppStatus> =>
@@ -50,3 +63,30 @@ export const getLatestVerify = (): Promise<VerifyReport> =>
 
 export const seedDemo = () => api.post('/demo/seed').then(r => r.data)
 export const seedHacking = () => api.post('/demo/seed-hacking').then(r => r.data)
+
+// Upload CSV files
+export const uploadData = (paymentsFile: File, invoicesFile: File) => {
+  const form = new FormData()
+  form.append('payments_file', paymentsFile)
+  form.append('invoices_file', invoicesFile)
+  return api.post('/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  }).then(r => r.data)
+}
+
+// Export reconciliation results as CSV download
+export const exportReconcile = () => {
+  const key = getApiKey()
+  const url = '/api/reconcile/export'
+  const a = document.createElement('a')
+  a.href = url
+  // Pass API key via custom header — use fetch for blob download
+  fetch(url, { headers: { 'X-API-Key': key } })
+    .then(r => r.blob())
+    .then(blob => {
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = 'reconciliation.csv'
+      link.click()
+    })
+}
