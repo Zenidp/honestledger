@@ -62,16 +62,25 @@ _jobs: dict[str, dict] = {}
 
 
 def _run_verify_job(job_id: str, proposal: RuleProposal, baseline_rules) -> None:
-    """Run verify in a background thread and update job store when done."""
+    """Run verify in a background thread and update job store when done.
+
+    For REWARD_HACKING verdicts: auto-records to history and clears the proposal
+    per spec — cheating attempts are rejected automatically.
+    """
     _jobs[job_id]["status"] = "running"
     try:
         report = run_verify(proposal, baseline_rules=baseline_rules)
+        _s.verify_report = report
         _jobs[job_id] = {
             "status": "done",
             "result": report.model_dump(),
             "error": None,
         }
-        _s.verify_report = report
+        # Auto-reject reward hacking per spec: "tolak otomatis, catat sebagai cheating attempt"
+        if report.verdict == VerifyVerdict.REWARD_HACKING:
+            _record_iteration(action="rejected")
+            _s.proposal = None
+            # Keep verify_report so the UI can display the red banner
     except Exception as e:
         _jobs[job_id] = {
             "status": "error",
@@ -186,15 +195,33 @@ def get_latest_proposal():
 
 # ── Layer 3: Verify ─────────────────────────────────────────────────────────────
 
-@app.post("/verify", response_model=VerifyReport)
+@app.post("/verify")
 def verify():
-    """Run Layer 3: test proposal on holdout to detect reward hacking."""
+    """Run Layer 3: test proposal on holdout to detect reward hacking.
+
+    Returns immediately with a job_id. Poll GET /jobs/{job_id} for status.
+    Runs 4 Gemini batches (~60 calls) so must be async — a synchronous call would timeout.
+    REWARD_HACKING verdicts are auto-rejected and recorded per spec.
+    """
     if not _s.proposal:
         raise HTTPException(400, "No proposal. POST /judge first.")
 
-    report = run_verify(_s.proposal, baseline_rules=get_current_rules())
-    _s.verify_report = report
-    return report
+    baseline_rules = get_current_rules()
+    job_id = uuid.uuid4().hex[:8]
+    _jobs[job_id] = {"status": "pending", "result": None, "error": None}
+
+    thread = threading.Thread(
+        target=_run_verify_job,
+        args=(job_id, _s.proposal, baseline_rules),
+        daemon=True,
+    )
+    thread.start()
+
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "message": "Verification started. Poll GET /jobs/{job_id} for result.",
+    }
 
 
 @app.post("/verify/greedy")
@@ -490,3 +517,24 @@ def _record_iteration(action: str):
         "action": action,
         "description": _s.proposal.description if _s.proposal else None,
     })
+
+
+# ── Production root app (serves frontend + API under /api) ───────────────────────
+# In local dev: `uvicorn backend.main:app` (port 8000) + Vite proxy handles /api.
+# In Cloud Run: `uvicorn backend.main:_root` — single container, one URL.
+
+import os as _os
+from fastapi.staticfiles import StaticFiles as _StaticFiles
+
+_root = FastAPI(title="HonestLedger")
+_root.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+_root.mount("/api", app)
+
+_frontend_dist = _os.path.join(_os.path.dirname(__file__), "..", "frontend", "dist")
+if _os.path.exists(_frontend_dist):
+    _root.mount("/", _StaticFiles(directory=_frontend_dist, html=True), name="frontend")

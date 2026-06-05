@@ -19,8 +19,8 @@ export const runReconcile = (split = 'train', rule_version?: string): Promise<Re
 export const runJudge = (next_version = 'v2'): Promise<RuleProposal> =>
   api.post<RuleProposal>('/judge', { next_version }).then(r => r.data)
 
-export const runVerify = (): Promise<VerifyReport> =>
-  api.post<VerifyReport>('/verify').then(r => r.data)
+export const runVerify = (): Promise<{ job_id: string; status: string }> =>
+  api.post('/verify').then(r => r.data)
 
 export const runVerifyGreedy = (base_version?: string): Promise<{ job_id: string; status: string }> =>
   api.post('/verify/greedy', { base_version }).then(r => r.data)

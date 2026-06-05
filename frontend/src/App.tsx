@@ -72,11 +72,40 @@ export default function App() {
     setShowBanner(false)
   })
 
-  const handleVerify = () => withLoading('verify', async () => {
-    const r = await api.runVerify()
-    setVerifyReport(r)
-    if (r.verdict === 'REWARD_HACKING') setShowBanner(true)
-  })
+  const handleVerify = async () => {
+    setLoading('verify')
+    setError(null)
+    try {
+      const { job_id } = await api.runVerify()
+
+      const poll = (): Promise<void> => new Promise((resolve, reject) => {
+        const interval = setInterval(async () => {
+          try {
+            const job = await api.getJob(job_id)
+            if (job.status === 'done' && job.result) {
+              clearInterval(interval)
+              setVerifyReport(job.result)
+              if (job.result.verdict === 'REWARD_HACKING') setShowBanner(true)
+              resolve()
+            } else if (job.status === 'error') {
+              clearInterval(interval)
+              reject(new Error(job.error ?? 'Verify job failed'))
+            }
+          } catch (e) {
+            clearInterval(interval)
+            reject(e)
+          }
+        }, 5000)
+      })
+
+      await poll()
+    } catch (e: any) {
+      setError(e?.response?.data?.detail ?? e?.message ?? 'Unknown error')
+    } finally {
+      setLoading(null)
+      await refreshStatus()
+    }
+  }
 
   const handleVerifyGreedy = async () => {
     setLoading('greedy')

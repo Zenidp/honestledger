@@ -33,7 +33,7 @@ _RULES: dict[str, RuleSet] = {
     ),
 }
 
-_CURRENT_VERSION = "v1"
+_CURRENT_VERSION = "v0"
 
 
 def get_current_rules() -> RuleSet:
