@@ -10,21 +10,8 @@ GENUINE_HOLDOUT_DELTA = 0.02
 HACKING_HOLDOUT_DROP = 0.05
 
 
-async def _run_on_splits(rules: RuleSet) -> tuple[float, float]:
-    payments = load_payments()
-    train_payments, holdout_payments = split_payments(payments)
-
-    print(f"  [verify] TRAIN+HOLDOUT in parallel (rules={rules.version}, "
-          f"{len(train_payments)}+{len(holdout_payments)} payments)...")
-    train_report, holdout_report = await asyncio.gather(
-        run_reconcile_batch(train_payments, split="train", rules=rules),
-        run_reconcile_batch(holdout_payments, split="holdout", rules=rules),
-    )
-    return train_report.accuracy, holdout_report.accuracy
-
-
 async def run_verify(proposal: RuleProposal, baseline_rules: RuleSet = None) -> VerifyReport:
-    """Async: verify a rule proposal against unseen holdout data."""
+    """Async: verify a rule proposal — runs all 4 batches in parallel for speed."""
     if baseline_rules is None:
         baseline_rules = get_current_rules()
 
@@ -33,15 +20,25 @@ async def run_verify(proposal: RuleProposal, baseline_rules: RuleSet = None) -> 
     print(f"{'='*60}")
 
     register_rules(baseline_rules)
-
-    print("\n[Step 1] Scoring BASELINE rules...")
-    baseline_train, baseline_holdout = await _run_on_splits(baseline_rules)
-
     proposed_rules = apply_rule_proposal(proposal, base_version=baseline_rules.version)
     register_rules(proposed_rules)
 
-    print(f"\n[Step 2] Scoring PROPOSED rules ({proposed_rules.version})...")
-    new_train, new_holdout = await _run_on_splits(proposed_rules)
+    payments = load_payments()
+    train_payments, holdout_payments = split_payments(payments)
+
+    print(f"\n[verify] All 4 batches in parallel — "
+          f"baseline+proposed × train({len(train_payments)})+holdout({len(holdout_payments)})...")
+    (
+        baseline_train_r, baseline_holdout_r,
+        new_train_r, new_holdout_r,
+    ) = await asyncio.gather(
+        run_reconcile_batch(train_payments,    split="train",   rules=baseline_rules),
+        run_reconcile_batch(holdout_payments,  split="holdout", rules=baseline_rules),
+        run_reconcile_batch(train_payments,    split="train",   rules=proposed_rules),
+        run_reconcile_batch(holdout_payments,  split="holdout", rules=proposed_rules),
+    )
+    baseline_train, baseline_holdout = baseline_train_r.accuracy, baseline_holdout_r.accuracy
+    new_train, new_holdout = new_train_r.accuracy, new_holdout_r.accuracy
 
     delta_train = new_train - baseline_train
     delta_holdout = new_holdout - baseline_holdout

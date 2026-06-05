@@ -11,7 +11,7 @@ from backend.agent.rules import get_current_rules, get_current_version
 from backend.data.loader import load_invoices, score_results
 
 _AGGRESSIVE_THRESHOLD = 0.05
-_RECONCILE_SEM = asyncio.Semaphore(5)  # max 5 concurrent Gemini calls
+_RECONCILE_SEM = asyncio.Semaphore(10)  # max 10 concurrent Gemini calls
 
 _AGGRESSIVE_MODE_INSTRUCTION = """
 
