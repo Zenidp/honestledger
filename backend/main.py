@@ -39,6 +39,10 @@ from backend.agent.reconcile import run_reconcile_batch
 from backend.agent.judge import run_judge
 from backend.agent.verify import run_verify
 
+# In-memory holdout baseline cache: tenant_id → holdout_accuracy
+# Avoids re-running baseline in verify when reconcile already scored holdout in background.
+_holdout_cache: dict[str, float] = {}
+
 # ── App setup ──────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="HonestLedger API", version="2.0.0")
@@ -304,16 +308,14 @@ def _generate_audit_pdf(results: list, row, tenant_name: str,
 
 # ── Background job runner ──────────────────────────────────────────────────────
 
-async def _cache_holdout_baseline(row_id: str, rules: RuleSet):
-    """Background: score holdout baseline so verify can skip re-running it."""
-    from backend.db.database import AsyncSessionLocal
+async def _cache_holdout_baseline(tenant_id: str, rules: RuleSet):
+    """Background: score holdout baseline and cache in memory so verify skips re-running it."""
     from backend.data.loader import split_payments, load_payments
     try:
         _, holdout_payments = split_payments(load_payments())
         report = await run_reconcile_batch(holdout_payments, split="holdout", rules=rules)
-        async with AsyncSessionLocal() as db:
-            await crud.update_reconcile_holdout(db, row_id, report.accuracy)
-        print(f"  [cache] Holdout baseline stored: {report.accuracy:.1%}", flush=True)
+        _holdout_cache[tenant_id] = report.accuracy
+        print(f"  [cache] Holdout baseline cached: {report.accuracy:.1%}", flush=True)
     except Exception as e:
         print(f"  [cache] Holdout baseline failed (non-fatal): {e}", flush=True)
 
@@ -333,7 +335,7 @@ async def _run_verify_job(job_id: str, tenant_id: str, proposal: RuleProposal, b
             # Use cached baseline scores if available to skip re-running baseline reconcile
             reconcile_row = await crud.get_latest_reconcile(db, tenant_id)
             cached_train = reconcile_row.accuracy if reconcile_row else None
-            cached_holdout = (reconcile_row.results or {}).get("holdout_accuracy") if reconcile_row else None
+            cached_holdout = _holdout_cache.get(tenant_id)
             if cached_train and cached_holdout:
                 await _step(f"Baseline cached (train={cached_train:.0%} holdout={cached_holdout:.0%}) — running proposed rules only...")
             else:
@@ -516,7 +518,7 @@ async def reconcile(
 
     # Background: score holdout baseline so verify can skip re-running it
     if req.split == "train":
-        asyncio.create_task(_cache_holdout_baseline(row.id, rules))
+        asyncio.create_task(_cache_holdout_baseline(tenant.id, rules))
 
     return report_dict
 

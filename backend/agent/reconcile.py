@@ -65,36 +65,9 @@ def _parse_response(payment_id: str, raw: str) -> MatchResult:
         )
 
 
-async def reconcile_payment(payment, invoices, rules: RuleSet = None) -> MatchResult:
-    """Async: reconcile a single payment against filtered invoice candidates via Gemini."""
-    if rules is None:
-        rules = get_current_rules()
-
-    candidates = _filter_candidate_invoices(payment, invoices, rules)
-    if not candidates:
-        return MatchResult(
-            payment_id=payment.id,
-            decision=MatchDecision.UNMATCHED,
-            matched_invoice_id=None,
-            confidence=0.95,
-            rationale=(
-                f"No invoice candidates passed name similarity filter "
-                f"(threshold={rules.name_similarity_threshold}). Auto-unmatched."
-            ),
-        )
-
-    client = get_gemini_client()
-    prompt = RECONCILE_USER.format(
-        payment_id=payment.id,
-        payment_date=payment.date,
-        payer_name=payment.payer_name,
-        amount=payment.amount,
-        reference=payment.reference or "(none)",
-        invoices_text=_format_invoices(candidates),
-    )
-
+async def _call_gemini_once(payment, candidates, rules: RuleSet):
+    """Single Gemini API call — no retry. Raises ClientError or Exception on failure."""
     from google.genai import types
-    from google.genai.errors import ClientError
 
     rules_text = (
         f"  name_similarity_threshold = {rules.name_similarity_threshold}\n"
@@ -107,48 +80,96 @@ async def reconcile_payment(payment, invoices, rules: RuleSet = None) -> MatchRe
     if rules.min_confidence <= _AGGRESSIVE_THRESHOLD:
         system_prompt += _AGGRESSIVE_MODE_INSTRUCTION
 
-    for attempt in range(4):
-        try:
-            response = await client.aio.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0.0,
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
-                ),
-            )
-            return _parse_response(payment.id, response.text)
-        except ClientError as e:
-            if "429" in str(e) and attempt < 3:
-                wait = 15 * (2 ** attempt)
-                print(f"    Rate limit hit, waiting {wait}s...", flush=True)
-                await asyncio.sleep(wait)
-            else:
-                raise
-        except Exception as e:
-            if attempt < 3:
-                wait = 10 * (2 ** attempt)
-                print(f"    Connection error ({type(e).__name__}), retry {attempt+1}/3 in {wait}s...", flush=True)
-                await asyncio.sleep(wait)
-            else:
-                return MatchResult(
-                    payment_id=payment.id,
-                    decision=MatchDecision.UNCERTAIN,
-                    matched_invoice_id=None,
-                    confidence=0.0,
-                    rationale=f"API connection failed after 3 retries: {type(e).__name__}",
-                )
+    prompt = RECONCILE_USER.format(
+        payment_id=payment.id,
+        payment_date=payment.date,
+        payer_name=payment.payer_name,
+        amount=payment.amount,
+        reference=payment.reference or "(none)",
+        invoices_text=_format_invoices(candidates),
+    )
+    client = get_gemini_client()
+    response = await client.aio.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=0.0,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
+    )
+    return _parse_response(payment.id, response.text)
+
+
+async def reconcile_payment(payment, invoices, rules: RuleSet = None) -> MatchResult:
+    """Async: reconcile a single payment (no retry — caller handles retry)."""
+    if rules is None:
+        rules = get_current_rules()
+    candidates = _filter_candidate_invoices(payment, invoices, rules)
+    if not candidates:
+        return MatchResult(
+            payment_id=payment.id,
+            decision=MatchDecision.UNMATCHED,
+            matched_invoice_id=None,
+            confidence=0.95,
+            rationale=(
+                f"No invoice candidates passed name similarity filter "
+                f"(threshold={rules.name_similarity_threshold}). Auto-unmatched."
+            ),
+        )
+    return await _call_gemini_once(payment, candidates, rules)
 
 
 async def _reconcile_one(idx: int, total: int, payment, invoices, rules: RuleSet) -> MatchResult:
-    """Reconcile one payment, rate-limited by module semaphore."""
-    async with _RECONCILE_SEM:
-        result = await reconcile_payment(payment, invoices, rules)
-    status = "✓" if result.decision != MatchDecision.UNCERTAIN else "?"
-    print(f"    [{idx:02d}/{total}] {payment.id} → {result.decision.value} "
-          f"(conf={result.confidence:.2f}) {status}", flush=True)
-    return result
+    """Reconcile one payment with retry. Semaphore is released BEFORE each sleep so other
+    calls can proceed while this one waits for rate-limit or connection recovery."""
+    from google.genai.errors import ClientError
+
+    candidates = _filter_candidate_invoices(payment, invoices, rules)
+    if not candidates:
+        result = MatchResult(
+            payment_id=payment.id,
+            decision=MatchDecision.UNMATCHED,
+            matched_invoice_id=None,
+            confidence=0.95,
+            rationale=f"No candidates (threshold={rules.name_similarity_threshold}). Auto-unmatched.",
+        )
+        print(f"    [{idx:02d}/{total}] {payment.id} → unmatched (no candidates) ✓", flush=True)
+        return result
+
+    sleep_before = 0.0
+    for attempt in range(4):
+        if sleep_before:
+            await asyncio.sleep(sleep_before)   # ← OUTSIDE semaphore
+
+        async with _RECONCILE_SEM:
+            try:
+                result = await _call_gemini_once(payment, candidates, rules)
+                status = "✓" if result.decision != MatchDecision.UNCERTAIN else "?"
+                print(f"    [{idx:02d}/{total}] {payment.id} → {result.decision.value} "
+                      f"(conf={result.confidence:.2f}) {status}", flush=True)
+                return result
+            except ClientError as e:
+                is_429 = "429" in str(e)
+                if not is_429 or attempt >= 3:
+                    print(f"    [{idx:02d}/{total}] {payment.id} → UNCERTAIN (ClientError)", flush=True)
+                    return MatchResult(payment_id=payment.id, decision=MatchDecision.UNCERTAIN,
+                                       confidence=0.0, rationale=f"API error: {str(e)[:120]}")
+                sleep_before = 15 * (2 ** attempt)   # 15 / 30 / 60 s
+                print(f"    [429] {payment.id} retry {attempt+1}/3 in {sleep_before:.0f}s "
+                      f"(sem released)...", flush=True)
+            except Exception as e:
+                if attempt >= 3:
+                    print(f"    [{idx:02d}/{total}] {payment.id} → UNCERTAIN (connection)", flush=True)
+                    return MatchResult(payment_id=payment.id, decision=MatchDecision.UNCERTAIN,
+                                       confidence=0.0, rationale=f"Connection failed: {type(e).__name__}")
+                sleep_before = 10 * (2 ** attempt)   # 10 / 20 / 40 s
+                print(f"    [err] {payment.id} retry {attempt+1}/3 in {sleep_before:.0f}s "
+                      f"(sem released)...", flush=True)
+        # semaphore context exits here — slot freed before sleep
+
+    return MatchResult(payment_id=payment.id, decision=MatchDecision.UNCERTAIN,
+                       confidence=0.0, rationale="Max retries exceeded")
 
 
 async def run_reconcile_batch(payments, split: str = "train", rules: RuleSet = None) -> ReconcileReport:
