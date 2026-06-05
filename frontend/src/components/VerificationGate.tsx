@@ -92,7 +92,7 @@ export function VerificationGate({ report, loading, logSteps = [], logRunning = 
                   className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full shrink-0" />
                 Running holdout verification...
               </div>
-              <CountdownTimer seconds={60} />
+              <CountdownTimer seconds={150} />
             </div>
             <ProcessLog steps={logSteps} running={logRunning} />
           </div>

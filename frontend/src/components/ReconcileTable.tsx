@@ -67,7 +67,7 @@ export function ReconcileTable({ report, loading, logSteps = [], logRunning = fa
                   className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full shrink-0" />
                 Running reconciliation...
               </div>
-              <CountdownTimer seconds={30} />
+              <CountdownTimer seconds={45} />
             </div>
             <ProcessLog steps={logSteps} running={logRunning} />
           </div>

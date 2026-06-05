@@ -32,7 +32,7 @@ export function RuleProposalCard({ proposal, loading, logSteps = [], logRunning 
                   className="w-4 h-4 border-2 border-amber-400 border-t-transparent rounded-full shrink-0" />
                 Analysing traces...
               </div>
-              <CountdownTimer seconds={20} />
+              <CountdownTimer seconds={25} />
             </div>
             <ProcessLog steps={logSteps} running={logRunning} />
           </div>
