@@ -1,10 +1,14 @@
 import { motion } from 'framer-motion'
 import { ShieldCheck, ShieldAlert, Shield } from 'lucide-react'
 import type { VerifyReport } from '../types'
+import { ProcessLog } from './ProcessLog'
+import { CountdownTimer } from './CountdownTimer'
 
 interface Props {
   report: VerifyReport | null
   loading?: boolean
+  logSteps?: string[]
+  logRunning?: boolean
 }
 
 function ScoreBar({ label, baseline, score, delta }: {
@@ -71,7 +75,7 @@ const verdictConfig = {
   },
 }
 
-export function VerificationGate({ report, loading }: Props) {
+export function VerificationGate({ report, loading, logSteps = [], logRunning = false }: Props) {
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
       <div className="px-5 py-4 border-b border-gray-100">
@@ -81,10 +85,16 @@ export function VerificationGate({ report, loading }: Props) {
 
       <div className="p-5">
         {loading ? (
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
-              className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full" />
-            Running holdout verification...
+          <div>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm text-gray-400">
+                <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
+                  className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full shrink-0" />
+                Running holdout verification...
+              </div>
+              <CountdownTimer seconds={60} />
+            </div>
+            <ProcessLog steps={logSteps} running={logRunning} />
           </div>
         ) : !report ? (
           <p className="text-sm text-gray-400">Run verify to test proposal against holdout data.</p>

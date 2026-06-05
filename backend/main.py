@@ -12,7 +12,7 @@ import io
 import uuid
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Header
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -203,28 +203,140 @@ def _reconcile_to_dict(r: ReconcileReport) -> dict:
     }
 
 
+# ── PDF generation ────────────────────────────────────────────────────────────
+
+def _generate_audit_pdf(results: list, row, tenant_name: str,
+                         payments_by_id: dict, invoices_by_id: dict,
+                         reconciled_at: str) -> bytes:
+    from fpdf import FPDF
+
+    matched_count = sum(1 for r in results if r.get("decision") == "matched")
+    unmatched_count = len(results) - matched_count
+    accuracy_pct = round((row.accuracy or 0) * 100, 1)
+
+    class _PDF(FPDF):
+        def header(self):
+            self.set_font("Helvetica", "B", 15)
+            self.set_text_color(13, 148, 136)
+            self.cell(0, 8, "HonestLedger", align="C", new_x="LMARGIN", new_y="NEXT")
+            self.set_font("Helvetica", "B", 11)
+            self.set_text_color(30, 30, 30)
+            self.cell(0, 6, "Reconciliation Audit Report", align="C", new_x="LMARGIN", new_y="NEXT")
+            self.set_font("Helvetica", "", 8)
+            self.set_text_color(120, 120, 120)
+            self.cell(0, 5,
+                f"Tenant: {tenant_name}   |   Rule: {row.rule_version}   |   {reconciled_at}",
+                align="C", new_x="LMARGIN", new_y="NEXT")
+            self.ln(3)
+
+        def footer(self):
+            self.set_y(-13)
+            self.set_font("Helvetica", "I", 7)
+            self.set_text_color(160, 160, 160)
+            self.cell(0, 5, f"HonestLedger Audit Report  ·  Page {self.page_no()}  ·  {reconciled_at}", align="C")
+
+    pdf = _PDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.set_margins(12, 12, 12)
+    pdf.add_page()
+
+    # Summary box
+    y0 = pdf.get_y()
+    pdf.set_fill_color(240, 253, 250)
+    pdf.set_draw_color(13, 148, 136)
+    pdf.rect(pdf.l_margin, y0, pdf.epw, 16, style="FD")
+    pdf.set_xy(pdf.l_margin + 6, y0 + 4)
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(13, 148, 136)
+    col = pdf.epw / 4
+    pdf.cell(col, 6, f"Total Payments: {row.total}")
+    pdf.cell(col, 6, f"Matched: {matched_count}")
+    pdf.cell(col, 6, f"Unmatched: {unmatched_count}")
+    pdf.cell(col, 6, f"Accuracy: {accuracy_pct}%")
+    pdf.ln(20)
+
+    # Table headers
+    col_w = [20, 40, 26, 22, 22, 30, 24, 89]
+    headers = ["Payment ID", "Payer Name", "Amt (IDR)", "Date", "Decision", "Matched Inv.", "Delta (IDR)", "Rationale"]
+    pdf.set_font("Helvetica", "B", 7.5)
+    pdf.set_fill_color(13, 148, 136)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_draw_color(200, 200, 200)
+    for w, h in zip(col_w, headers):
+        pdf.cell(w, 7, h, border=1, fill=True)
+    pdf.ln()
+
+    pdf.set_font("Helvetica", "", 7)
+    for i, r in enumerate(results):
+        pdf.set_fill_color(249, 250, 251) if i % 2 == 0 else pdf.set_fill_color(255, 255, 255)
+        pdf.set_text_color(30, 30, 30)
+
+        payment = payments_by_id.get(r.get("payment_id", ""))
+        matched_id = r.get("matched_invoice_id") or ""
+        first_inv_id = matched_id.split("+")[0] if matched_id else ""
+        invoice = invoices_by_id.get(first_inv_id)
+
+        payer = (payment.payer_name[:22] if payment else "")
+        amt = f"{payment.amount:,.0f}" if payment else ""
+        date = payment.date if payment else ""
+        decision = r.get("decision", "").upper()
+        inv_id = matched_id[:14] if matched_id else "—"
+        delta_val = ""
+        if payment and invoice:
+            delta_val = f"{payment.amount - invoice.amount:+,.0f}"
+        rationale = (r.get("rationale") or "")[:75]
+        if len(r.get("rationale") or "") > 75:
+            rationale += "…"
+
+        row_data = [r.get("payment_id", ""), payer, amt, date, decision, inv_id, delta_val, rationale]
+        fill = i % 2 == 0
+        for w, d in zip(col_w, row_data):
+            pdf.cell(w, 6, str(d), border=1, fill=fill)
+        pdf.ln()
+
+    pdf.ln(4)
+    pdf.set_font("Helvetica", "I", 7)
+    pdf.set_text_color(150, 150, 150)
+    pdf.cell(0, 4, "* Rationale truncated. Full text available in Audit CSV export.")
+
+    return bytes(pdf.output())
+
+
 # ── Background job runner ──────────────────────────────────────────────────────
 
 async def _run_verify_job(job_id: str, tenant_id: str, proposal: RuleProposal, baseline_rules: RuleSet):
     from backend.db.database import AsyncSessionLocal
     async with AsyncSessionLocal() as db:
+        steps: list[str] = []
+
+        async def _step(msg: str):
+            steps.append(msg)
+            await crud.update_job(db, job_id, tenant_id, status="running", progress={"steps": list(steps)})
+
         try:
-            await crud.update_job(db, job_id, tenant_id, status="running")
+            await _step("Initializing verification framework...")
+            await _step(f"Running train + holdout reconciliation with '{proposal.rule_version}'...")
             report = await run_verify(proposal, baseline_rules)
+
+            await _step(f"Train score: {round(report.score_train * 100, 1)}%  |  Holdout score: {round(report.score_holdout * 100, 1)}%")
+            await _step(f"Delta holdout: {report.delta_holdout:+.1%}  →  Verdict: {report.verdict.value}")
 
             report_dict = _report_to_dict(report)
             await crud.save_verify_report(db, tenant_id, report_dict)
 
             if report.verdict == VerifyVerdict.REWARD_HACKING:
+                await _step("⚠ REWARD HACKING detected — proposal auto-rejected.")
                 proposal_row = await crud.get_latest_proposal(db, tenant_id)
                 p = _proposal_from_dict(proposal_row.proposal) if proposal_row else proposal
                 await _record_iteration(db, tenant_id, report, p, "rejected")
                 await crud.clear_proposal(db, tenant_id)
                 await crud.clear_verify_report(db, tenant_id)
+            else:
+                await _step("✓ Genuine improvement confirmed — awaiting human approval.")
 
-            await crud.update_job(db, job_id, tenant_id, status="done", result=report_dict)
+            await crud.update_job(db, job_id, tenant_id, status="done", result=report_dict, progress={"steps": steps})
         except Exception as e:
-            await crud.update_job(db, job_id, tenant_id, status="error", error=str(e))
+            await crud.update_job(db, job_id, tenant_id, status="error", error=str(e), progress={"steps": steps})
 
 
 # ── Admin: create tenant + API key ─────────────────────────────────────────────
@@ -393,32 +505,103 @@ async def get_latest_reconcile(
 
 @app.get("/reconcile/export")
 async def export_reconcile(
+    format: str = Query("audit_csv", pattern="^(audit_csv|accounting_csv|audit_pdf)$"),
     db: AsyncSession = Depends(get_db),
     tenant: Tenant = Depends(get_tenant),
 ):
-    """Download reconciliation results as CSV."""
+    """Download reconciliation results — format: audit_csv | accounting_csv | audit_pdf."""
     row = await crud.get_latest_reconcile(db, tenant.id)
     if not row:
         raise HTTPException(404, "No reconcile results to export.")
 
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["payment_id", "decision", "matched_invoice_id", "confidence", "rationale", "rule_version"])
-    for r in row.results:
-        writer.writerow([
-            r.get("payment_id", ""),
-            r.get("decision", ""),
-            r.get("matched_invoice_id", "") or "",
-            round(r.get("confidence", 0), 4),
-            r.get("rationale", ""),
-            row.rule_version or "",
-        ])
+    results = row.results
+    reconciled_at = row.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if row.created_at else "N/A"
+    slug = tenant.id[:8]
 
-    output.seek(0)
+    # Build payment/invoice lookup — prefer uploaded data, fall back to built-in demo set
+    upload = await crud.get_latest_upload(db, tenant.id)
+    if upload and upload.payments:
+        payments_by_id = {p["id"]: p for p in upload.payments}
+        invoices_by_id = {i["id"]: i for i in upload.invoices}
+        def _payer(r): d = payments_by_id.get(r.get("payment_id", "")); return d or {}
+        def _inv(r):
+            mid = r.get("matched_invoice_id") or ""
+            fid = mid.split("+")[0] if mid else ""
+            return invoices_by_id.get(fid) or {}
+        def _amount(d, key): return float(d.get(key) or 0) if d else 0
+        def _delta(r):
+            p = _payer(r); i = _inv(r)
+            if p and i: return round(_amount(p, "amount") - _amount(i, "amount"), 2)
+            return None
+        def _pname(r): return (_payer(r) or {}).get("payer_name", "")
+        def _pamount(r): return _amount(_payer(r), "amount") or ""
+        def _pdate(r): return (_payer(r) or {}).get("date", "")
+        def _iamount(r): return _amount(_inv(r), "amount") or ""
+    else:
+        _payments = {p.id: p for p in load_payments()}
+        _invoices = {i.id: i for i in load_invoices()}
+        def _payer(r): return _payments.get(r.get("payment_id", ""))  # type: ignore[return-value]
+        def _inv(r):
+            mid = r.get("matched_invoice_id") or ""
+            fid = mid.split("+")[0] if mid else ""
+            return _invoices.get(fid)  # type: ignore[return-value]
+        def _delta(r):
+            p = _payer(r); i = _inv(r)
+            if p and i: return round(p.amount - i.amount, 2)
+            return None
+        def _pname(r): p = _payer(r); return p.payer_name if p else ""
+        def _pamount(r): p = _payer(r); return p.amount if p else ""
+        def _pdate(r): p = _payer(r); return p.date if p else ""
+        def _iamount(r): i = _inv(r); return i.amount if i else ""
+
+    if format == "accounting_csv":
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["payment_id", "payer_name", "payment_amount", "payment_date",
+                     "status", "matched_invoice_id", "invoice_amount", "delta_amount", "reconciled_at"])
+        for r in results:
+            decision = r.get("decision", "unmatched")
+            status = "MATCHED" if decision == "matched" else "REQUIRES REVIEW"
+            d = _delta(r)
+            w.writerow([r.get("payment_id", ""), _pname(r), _pamount(r), _pdate(r),
+                         status, r.get("matched_invoice_id") or "", _iamount(r),
+                         d if d is not None else "", reconciled_at])
+        out.seek(0)
+        return StreamingResponse(
+            io.BytesIO(out.getvalue().encode("utf-8")), media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=reconciliation_{slug}_accounting.csv"},
+        )
+
+    if format == "audit_pdf":
+        if upload and upload.payments:
+            pb = {p["id"]: type("P", (), {"payer_name": p.get("payer_name",""), "amount": float(p.get("amount",0)), "date": p.get("date","")})() for p in upload.payments}
+            ib = {i["id"]: type("I", (), {"amount": float(i.get("amount",0))})() for i in upload.invoices}
+        else:
+            pb = {p.id: p for p in load_payments()}
+            ib = {i.id: i for i in load_invoices()}
+        pdf_bytes = _generate_audit_pdf(results, row, tenant.name, pb, ib, reconciled_at)
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes), media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename=reconciliation_{slug}_audit.pdf"},
+        )
+
+    # Default: audit_csv
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["payment_id", "payer_name", "payment_amount", "payment_date",
+                 "decision", "matched_invoice_id", "invoice_amount", "delta_amount",
+                 "confidence", "rationale", "rule_version", "reconciled_at"])
+    for r in results:
+        d = _delta(r)
+        w.writerow([r.get("payment_id", ""), _pname(r), _pamount(r), _pdate(r),
+                     r.get("decision", ""), r.get("matched_invoice_id") or "",
+                     _iamount(r), d if d is not None else "",
+                     round(r.get("confidence", 0), 4), r.get("rationale", ""),
+                     row.rule_version or "", reconciled_at])
+    out.seek(0)
     return StreamingResponse(
-        io.BytesIO(output.getvalue().encode("utf-8")),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=reconciliation_{tenant.id[:8]}.csv"},
+        io.BytesIO(out.getvalue().encode("utf-8")), media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=reconciliation_{slug}_audit.csv"},
     )
 
 
@@ -524,7 +707,7 @@ async def get_job(
     job = await crud.get_job(db, job_id, tenant.id)
     if not job:
         raise HTTPException(404, f"Job '{job_id}' not found.")
-    return {"status": job.status, "result": job.result, "error": job.error}
+    return {"status": job.status, "result": job.result, "error": job.error, "progress": job.progress}
 
 
 @app.get("/verify/latest")

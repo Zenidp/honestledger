@@ -38,8 +38,12 @@ export const runVerify = (): Promise<{ job_id: string; status: string }> =>
 export const runVerifyGreedy = (base_version?: string): Promise<{ job_id: string; status: string }> =>
   api.post('/verify/greedy', { base_version }).then(r => r.data)
 
-export const getJob = (job_id: string): Promise<{ status: string; result: VerifyReport | null; error: string | null }> =>
-  api.get(`/jobs/${job_id}`).then(r => r.data)
+export const getJob = (job_id: string): Promise<{
+  status: string
+  result: VerifyReport | null
+  error: string | null
+  progress: { steps: string[] } | null
+}> => api.get(`/jobs/${job_id}`).then(r => r.data)
 
 export const approveProposal = (): Promise<{ approved: boolean; active_version: string }> =>
   api.post('/approve', {}).then(r => r.data)
@@ -74,19 +78,18 @@ export const uploadData = (paymentsFile: File, invoicesFile: File) => {
   }).then(r => r.data)
 }
 
-// Export reconciliation results as CSV download
-export const exportReconcile = () => {
+// Export reconciliation results — format: audit_csv | accounting_csv | audit_pdf
+export const exportReconcile = (format: 'audit_csv' | 'accounting_csv' | 'audit_pdf' = 'audit_csv') => {
   const key = getApiKey()
-  const url = '/api/reconcile/export'
-  const a = document.createElement('a')
-  a.href = url
-  // Pass API key via custom header — use fetch for blob download
+  const url = `/api/reconcile/export?format=${format}`
+  const ext = format === 'audit_pdf' ? 'pdf' : 'csv'
+  const label = format === 'audit_csv' ? 'audit' : format === 'accounting_csv' ? 'accounting' : 'audit'
   fetch(url, { headers: { 'X-API-Key': key } })
     .then(r => r.blob())
     .then(blob => {
       const link = document.createElement('a')
       link.href = URL.createObjectURL(blob)
-      link.download = 'reconciliation.csv'
+      link.download = `reconciliation_${label}.${ext}`
       link.click()
     })
 }

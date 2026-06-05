@@ -1,13 +1,17 @@
 import { motion } from 'framer-motion'
 import { Lightbulb, ArrowRight } from 'lucide-react'
 import type { RuleProposal } from '../types'
+import { ProcessLog } from './ProcessLog'
+import { CountdownTimer } from './CountdownTimer'
 
 interface Props {
   proposal: RuleProposal | null
   loading?: boolean
+  logSteps?: string[]
+  logRunning?: boolean
 }
 
-export function RuleProposalCard({ proposal, loading }: Props) {
+export function RuleProposalCard({ proposal, loading, logSteps = [], logRunning = false }: Props) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 10 }}
@@ -21,10 +25,16 @@ export function RuleProposalCard({ proposal, loading }: Props) {
 
       <div className="p-5">
         {loading ? (
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
-              className="w-4 h-4 border-2 border-amber-400 border-t-transparent rounded-full" />
-            Analysing traces...
+          <div>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm text-gray-400">
+                <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
+                  className="w-4 h-4 border-2 border-amber-400 border-t-transparent rounded-full shrink-0" />
+                Analysing traces...
+              </div>
+              <CountdownTimer seconds={20} />
+            </div>
+            <ProcessLog steps={logSteps} running={logRunning} />
           </div>
         ) : !proposal ? (
           <p className="text-sm text-gray-400">Run judge to get a rule improvement proposal.</p>

@@ -1,10 +1,15 @@
+import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircle2, XCircle, HelpCircle } from 'lucide-react'
+import { CheckCircle2, XCircle, HelpCircle, ChevronDown, ChevronUp } from 'lucide-react'
 import type { ReconcileReport } from '../types'
+import { ProcessLog } from './ProcessLog'
+import { CountdownTimer } from './CountdownTimer'
 
 interface Props {
   report: ReconcileReport | null
   loading?: boolean
+  logSteps?: string[]
+  logRunning?: boolean
 }
 
 const DecisionBadge = ({ decision, confidence }: { decision: string; confidence: number }) => {
@@ -25,7 +30,15 @@ const DecisionBadge = ({ decision, confidence }: { decision: string; confidence:
   )
 }
 
-export function ReconcileTable({ report, loading }: Props) {
+export function ReconcileTable({ report, loading, logSteps = [], logRunning = false }: Props) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  const toggle = (id: string) => setExpanded(prev => {
+    const next = new Set(prev)
+    next.has(id) ? next.delete(id) : next.add(id)
+    return next
+  })
+
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
       <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
@@ -47,10 +60,16 @@ export function ReconcileTable({ report, loading }: Props) {
 
       <div className="overflow-auto max-h-[420px] scrollbar-thin">
         {loading ? (
-          <div className="flex items-center justify-center h-32 text-sm text-gray-400">
-            <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
-              className="w-5 h-5 border-2 border-teal-400 border-t-transparent rounded-full mr-2" />
-            Running reconciliation...
+          <div className="px-5 py-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm text-gray-400">
+                <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
+                  className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full shrink-0" />
+                Running reconciliation...
+              </div>
+              <CountdownTimer seconds={30} />
+            </div>
+            <ProcessLog steps={logSteps} running={logRunning} />
           </div>
         ) : !report ? (
           <div className="flex items-center justify-center h-32 text-sm text-gray-400">
@@ -64,17 +83,22 @@ export function ReconcileTable({ report, loading }: Props) {
                 <th className="px-4 py-2.5 text-left font-medium text-gray-500">Decision</th>
                 <th className="px-4 py-2.5 text-left font-medium text-gray-500">Matched Invoice</th>
                 <th className="px-4 py-2.5 text-left font-medium text-gray-500">Conf.</th>
-                <th className="px-4 py-2.5 text-left font-medium text-gray-500">Rationale</th>
+                <th className="px-4 py-2.5 text-left font-medium text-gray-500">
+                  Rationale <span className="text-gray-300 font-normal">(click row to expand)</span>
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
               <AnimatePresence>
-                {report.results.map((r, i) => (
+                {report.results.map((r, i) => {
+                  const isExpanded = expanded.has(r.payment_id)
+                  return (
                   <motion.tr key={r.payment_id}
                     initial={{ opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ delay: i * 0.02 }}
-                    className="hover:bg-gray-50 transition-colors">
+                    onClick={() => toggle(r.payment_id)}
+                    className="hover:bg-gray-50 cursor-pointer transition-colors">
                     <td className="px-4 py-2.5 font-mono text-gray-700">{r.payment_id}</td>
                     <td className="px-4 py-2.5">
                       <DecisionBadge decision={r.decision} confidence={r.confidence} />
@@ -89,9 +113,20 @@ export function ReconcileTable({ report, loading }: Props) {
                         <span className="text-gray-500">{(r.confidence * 100).toFixed(0)}%</span>
                       </div>
                     </td>
-                    <td className="px-4 py-2.5 text-gray-500 max-w-xs truncate">{r.rationale}</td>
+                    <td className="px-4 py-2.5 max-w-sm">
+                      <div className="flex items-start gap-1.5">
+                        <p className={`text-gray-500 text-xs flex-1 ${isExpanded ? 'whitespace-normal' : 'line-clamp-2'}`}>
+                          {r.rationale}
+                        </p>
+                        {isExpanded
+                          ? <ChevronUp className="w-3 h-3 text-gray-300 shrink-0 mt-0.5" />
+                          : <ChevronDown className="w-3 h-3 text-gray-300 shrink-0 mt-0.5" />
+                        }
+                      </div>
+                    </td>
                   </motion.tr>
-                ))}
+                  )
+                })}
               </AnimatePresence>
             </tbody>
           </table>
