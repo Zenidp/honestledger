@@ -17,12 +17,14 @@ PHOENIX_COLLECTOR_ENDPOINT: str = os.environ["PHOENIX_COLLECTOR_ENDPOINT"]
 
 
 def get_gemini_client():
-    """Return a google-genai Client configured for Vertex AI."""
+    """Return a google-genai Client configured for Vertex AI with explicit timeouts."""
     import google.genai as genai
+    from google.genai import types
 
     return genai.Client(
         vertexai=True,
         project=GOOGLE_CLOUD_PROJECT,
         location=GOOGLE_CLOUD_LOCATION,
+        http_options=types.HttpOptions(timeout=180),  # 3 min per request, not infinite
     )
 

@@ -120,6 +120,8 @@ def reconcile_payment(payment, invoices, rules: RuleSet = None) -> MatchResult:
     if rules.min_confidence <= _AGGRESSIVE_THRESHOLD:
         system_prompt += _AGGRESSIVE_MODE_INSTRUCTION
 
+    import httpx
+
     for attempt in range(4):
         try:
             response = client.models.generate_content(
@@ -140,6 +142,19 @@ def reconcile_payment(payment, invoices, rules: RuleSet = None) -> MatchResult:
                 time.sleep(wait)
             else:
                 raise
+        except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+            if attempt < 3:
+                wait = 10 * (2 ** attempt)  # 10s, 20s, 40s
+                print(f"    Connection error ({type(e).__name__}), retry {attempt+1}/3 in {wait}s...", flush=True)
+                time.sleep(wait)
+            else:
+                return MatchResult(
+                    payment_id=payment.id,
+                    decision=MatchDecision.UNCERTAIN,
+                    matched_invoice_id=None,
+                    confidence=0.0,
+                    rationale=f"API connection failed after 3 retries: {type(e).__name__}",
+                )
 
 
 def run_reconcile_batch(payments, split: str = "train", rules: RuleSet = None) -> ReconcileReport:

@@ -7,6 +7,8 @@ import logging
 logging.getLogger("opentelemetry.sdk.trace.export").setLevel(logging.CRITICAL)
 logging.getLogger("opentelemetry.exporter.otlp").setLevel(logging.CRITICAL)
 
+import threading
+import uuid
 from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,6 +55,29 @@ class _State:
     iteration_history: list[dict] = []
 
 _s = _State()
+
+# ── Background job store ────────────────────────────────────────────────────────
+# Stores long-running verify jobs: {job_id: {status, result, error, progress}}
+_jobs: dict[str, dict] = {}
+
+
+def _run_verify_job(job_id: str, proposal: RuleProposal, baseline_rules) -> None:
+    """Run verify in a background thread and update job store when done."""
+    _jobs[job_id]["status"] = "running"
+    try:
+        report = run_verify(proposal, baseline_rules=baseline_rules)
+        _jobs[job_id] = {
+            "status": "done",
+            "result": report.model_dump(),
+            "error": None,
+        }
+        _s.verify_report = report
+    except Exception as e:
+        _jobs[job_id] = {
+            "status": "error",
+            "result": None,
+            "error": str(e),
+        }
 
 
 # ── Request / Response helpers ─────────────────────────────────────────────────
@@ -172,9 +197,13 @@ def verify():
     return report
 
 
-@app.post("/verify/greedy", response_model=VerifyReport)
+@app.post("/verify/greedy")
 def verify_greedy(req: GreedyProposalRequest):
-    """Inject a greedy (reward-hacking) proposal and verify it — for demo."""
+    """Start a greedy (reward-hacking) verify job in the background.
+
+    Returns immediately with a job_id. Poll GET /jobs/{job_id} for status.
+    This is the production-ready pattern for long-running Gemini operations.
+    """
     base = get_rules(req.base_version) if req.base_version else get_current_rules()
     greedy_proposal = RuleProposal(
         rule_version=f"{base.version}-greedy",
@@ -186,13 +215,35 @@ def verify_greedy(req: GreedyProposalRequest):
             "date_tolerance_days=365",
             "min_confidence=0.0",
         ],
-        rationale="Demo reward-hacking scenario: loosen everything to inflate match rate.",
-        proposed_by="demo",
+        rationale="Aggressive matching — optimise for match count regardless of accuracy.",
+        proposed_by="system",
     )
     _s.proposal = greedy_proposal
-    report = run_verify(greedy_proposal, baseline_rules=base)
-    _s.verify_report = report
-    return report
+
+    job_id = uuid.uuid4().hex[:8]
+    _jobs[job_id] = {"status": "pending", "result": None, "error": None}
+
+    thread = threading.Thread(
+        target=_run_verify_job,
+        args=(job_id, greedy_proposal, base),
+        daemon=True,
+    )
+    thread.start()
+
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "message": "Greedy verification started. Poll GET /jobs/{job_id} for result.",
+    }
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str):
+    """Poll the status of a background verify job."""
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, f"Job '{job_id}' not found.")
+    return job
 
 
 @app.get("/verify/latest")

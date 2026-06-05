@@ -22,8 +22,11 @@ export const runJudge = (next_version = 'v2'): Promise<RuleProposal> =>
 export const runVerify = (): Promise<VerifyReport> =>
   api.post<VerifyReport>('/verify').then(r => r.data)
 
-export const runVerifyGreedy = (base_version?: string): Promise<VerifyReport> =>
-  api.post<VerifyReport>('/verify/greedy', { base_version }).then(r => r.data)
+export const runVerifyGreedy = (base_version?: string): Promise<{ job_id: string; status: string }> =>
+  api.post('/verify/greedy', { base_version }).then(r => r.data)
+
+export const getJob = (job_id: string): Promise<{ status: string; result: VerifyReport | null; error: string | null }> =>
+  api.get(`/jobs/${job_id}`).then(r => r.data)
 
 export const approveProposal = (): Promise<{ approved: boolean; active_version: string }> =>
   api.post('/approve', {}).then(r => r.data)

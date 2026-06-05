@@ -78,13 +78,42 @@ export default function App() {
     if (r.verdict === 'REWARD_HACKING') setShowBanner(true)
   })
 
-  const handleVerifyGreedy = () => withLoading('greedy', async () => {
-    // Use pre-computed hacking result (instant) — no Gemini calls needed for demo
-    await api.seedHacking()
-    const r = await api.getLatestVerify()
-    setVerifyReport(r)
-    if (r.verdict === 'REWARD_HACKING') setShowBanner(true)
-  })
+  const handleVerifyGreedy = async () => {
+    setLoading('greedy')
+    setError(null)
+    try {
+      // Start background job — returns immediately with job_id
+      const { job_id } = await api.runVerifyGreedy()
+
+      // Poll until done (Gemini calls run in backend thread)
+      const poll = (): Promise<void> => new Promise((resolve, reject) => {
+        const interval = setInterval(async () => {
+          try {
+            const job = await api.getJob(job_id)
+            if (job.status === 'done' && job.result) {
+              clearInterval(interval)
+              setVerifyReport(job.result)
+              if (job.result.verdict === 'REWARD_HACKING') setShowBanner(true)
+              resolve()
+            } else if (job.status === 'error') {
+              clearInterval(interval)
+              reject(new Error(job.error ?? 'Verify job failed'))
+            }
+          } catch (e) {
+            clearInterval(interval)
+            reject(e)
+          }
+        }, 5000)  // poll every 5 seconds
+      })
+
+      await poll()
+    } catch (e: any) {
+      setError(e?.response?.data?.detail ?? e?.message ?? 'Unknown error')
+    } finally {
+      setLoading(null)
+      await refreshStatus()
+    }
+  }
 
   const handleApprove = () => withLoading('approve', async () => {
     await api.approveProposal()
