@@ -79,7 +79,9 @@ export default function App() {
   })
 
   const handleVerifyGreedy = () => withLoading('greedy', async () => {
-    const r = await api.runVerifyGreedy()
+    // Use pre-computed hacking result (instant) — no Gemini calls needed for demo
+    await api.seedHacking()
+    const r = await api.getLatestVerify()
     setVerifyReport(r)
     if (r.verdict === 'REWARD_HACKING') setShowBanner(true)
   })
