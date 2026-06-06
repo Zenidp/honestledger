@@ -13,7 +13,10 @@ interface Props {
   onSeedDemo: () => void
   onReset: () => void
   loading: string | null
+  pipelineRunning: boolean
 }
+
+type Variant = 'primary' | 'secondary' | 'danger' | 'ghost' | 'active-judge' | 'active-verify'
 
 interface BtnProps {
   label: string
@@ -21,16 +24,18 @@ interface BtnProps {
   onClick: () => void
   loading?: boolean
   disabled?: boolean
-  variant?: 'primary' | 'secondary' | 'danger' | 'ghost'
+  variant?: Variant
 }
 
 function ActionButton({ label, icon, onClick, loading, disabled, variant = 'secondary' }: BtnProps) {
   const base = 'flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all'
-  const styles = {
-    primary: 'bg-teal-600 text-white hover:bg-teal-700 shadow-sm',
-    secondary: 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50',
-    danger: 'bg-red-50 text-red-600 border border-red-200 hover:bg-red-100',
-    ghost: 'text-gray-400 hover:text-gray-600 hover:bg-gray-50',
+  const styles: Record<Variant, string> = {
+    primary:        'bg-teal-600 text-white hover:bg-teal-700 shadow-sm',
+    secondary:      'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50',
+    danger:         'bg-red-50 text-red-600 border border-red-200 hover:bg-red-100',
+    ghost:          'text-gray-400 hover:text-gray-600 hover:bg-gray-50',
+    'active-judge': 'bg-amber-500 text-white shadow-sm',
+    'active-verify':'bg-indigo-500 text-white shadow-sm',
   }
 
   return (
@@ -43,26 +48,55 @@ function ActionButton({ label, icon, onClick, loading, disabled, variant = 'seco
   )
 }
 
-export function ActionBar({ status, hasReconcile, hasProposal, onReconcile, onJudge, onVerify, onVerifyGreedy, onSeedDemo, onReset, loading }: Props) {
+export function ActionBar({
+  status, hasReconcile, hasProposal,
+  onReconcile, onJudge, onVerify, onVerifyGreedy,
+  onSeedDemo, onReset,
+  loading, pipelineRunning,
+}: Props) {
+  // During auto-chain, all pipeline buttons are blocked
+  const pipelineBlocked = pipelineRunning || !!loading
+
   return (
     <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-5 py-3 space-y-2">
       <div className="flex items-center justify-between gap-4">
-        {/* Live pipeline buttons */}
+        {/* Pipeline buttons */}
         <div className="flex items-center gap-2 flex-wrap">
-          <ActionButton label="Run Reconcile" icon={<Play className="w-3.5 h-3.5" />}
-            onClick={onReconcile} loading={loading === 'reconcile'} variant="primary" />
+          <ActionButton
+            label="Run Reconcile"
+            icon={<Play className="w-3.5 h-3.5" />}
+            onClick={onReconcile}
+            loading={loading === 'reconcile'}
+            disabled={pipelineBlocked && loading !== 'reconcile'}
+            variant="primary"
+          />
 
-          <ActionButton label="Run Judge" icon={<Brain className="w-3.5 h-3.5" />}
-            onClick={onJudge} loading={loading === 'judge'}
-            disabled={!hasReconcile} />
+          <ActionButton
+            label="Run Judge"
+            icon={<Brain className="w-3.5 h-3.5" />}
+            onClick={onJudge}
+            loading={loading === 'judge'}
+            disabled={pipelineBlocked && loading !== 'judge' || !hasReconcile}
+            variant={loading === 'judge' ? 'active-judge' : 'secondary'}
+          />
 
-          <ActionButton label="Verify Proposal" icon={<Shield className="w-3.5 h-3.5" />}
-            onClick={onVerify} loading={loading === 'verify'}
-            disabled={!hasProposal} />
+          <ActionButton
+            label="Verify Proposal"
+            icon={<Shield className="w-3.5 h-3.5" />}
+            onClick={onVerify}
+            loading={loading === 'verify'}
+            disabled={pipelineBlocked && loading !== 'verify' || !hasProposal}
+            variant={loading === 'verify' ? 'active-verify' : 'secondary'}
+          />
 
-          <ActionButton label="Greedy Attack" icon={<AlertTriangle className="w-3.5 h-3.5" />}
-            onClick={onVerifyGreedy} loading={loading === 'greedy'}
-            variant="danger" />
+          <ActionButton
+            label="Greedy Attack"
+            icon={<AlertTriangle className="w-3.5 h-3.5" />}
+            onClick={onVerifyGreedy}
+            loading={loading === 'greedy'}
+            disabled={pipelineBlocked && loading !== 'greedy'}
+            variant="danger"
+          />
         </div>
 
         <div className="flex items-center gap-2">
@@ -72,7 +106,7 @@ export function ActionBar({ status, hasReconcile, hasProposal, onReconcile, onJu
             </div>
           )}
           <ActionButton label="Reset" icon={<RefreshCw className="w-3.5 h-3.5" />}
-            onClick={onReset} variant="ghost" />
+            onClick={onReset} disabled={pipelineBlocked} variant="ghost" />
         </div>
       </div>
 
@@ -83,16 +117,6 @@ export function ActionBar({ status, hasReconcile, hasProposal, onReconcile, onJu
           onClick={onSeedDemo} loading={loading === 'seed'}
           variant="secondary" />
         <span className="text-xs text-gray-300">Loads pre-computed results — no Gemini calls, perfect for recording</span>
-      </div>
-
-      <div className="flex items-center gap-3">
-        {status && (
-          <div className="text-xs text-gray-500 font-mono hidden sm:block">
-            rules: <span className="text-teal-600 font-medium">{status.current_rule_version}</span>
-          </div>
-        )}
-        <ActionButton label="Reset" icon={<RefreshCw className="w-3.5 h-3.5" />}
-          onClick={onReset} variant="ghost" />
       </div>
     </div>
   )

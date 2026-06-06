@@ -48,6 +48,7 @@ export default function App() {
   const [logSteps, setLogSteps] = useState<string[]>([])
   const [logRunning, setLogRunning] = useState(false)
   const [showExportMenu, setShowExportMenu] = useState(false)
+  const [pipelineRunning, setPipelineRunning] = useState(false)
 
   const logTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -110,36 +111,45 @@ export default function App() {
   }
 
   const handleReconcile = async () => {
+    setPipelineRunning(true)
     const stop = startSimulatedLog(RECONCILE_STEPS)
     setLoading('reconcile'); setError(null)
+    let success = false
     try {
       const report = await api.runReconcile('train')
       stop()
       setLogSteps([...RECONCILE_STEPS, `✓ Done — ${report.correct}/${report.total} matched (${Math.round(report.accuracy * 100)}% accuracy)`])
       setReconcile(report)
       setProposal(null); setVerifyReport(null); setShowBanner(false)
+      success = true
     } catch (e: any) {
       stop()
       setError(e?.response?.data?.detail ?? e?.message ?? 'Unknown error')
     } finally {
       setLoading(null); await refreshStatus()
     }
+    if (success) await handleJudge(true)
+    else setPipelineRunning(false)
   }
 
-  const handleJudge = async () => {
+  const handleJudge = async (autoChain = false) => {
     const stop = startSimulatedLog(JUDGE_STEPS, 2500)
     setLoading('judge'); setError(null)
+    let success = false
     try {
       const p = await api.runJudge()
       stop()
       setLogSteps([...JUDGE_STEPS, `✓ Proposal generated — ${p.rule_version}`])
       setProposal(p); setVerifyReport(null); setShowBanner(false)
+      success = true
     } catch (e: any) {
       stop()
       setError(e?.response?.data?.detail ?? e?.message ?? 'Unknown error')
     } finally {
       setLoading(null); await refreshStatus()
     }
+    if (success && autoChain) await handleVerify()
+    else if (!success && autoChain) setPipelineRunning(false)
   }
 
   const pollJob = async (job_id: string, onDone: (result: VerifyReport) => void) => {
@@ -177,7 +187,10 @@ export default function App() {
       })
     } catch (e: any) {
       setError(e?.response?.data?.detail ?? e?.message ?? 'Unknown error')
-    } finally { setLoading(null); await refreshStatus() }
+    } finally {
+      setLoading(null); await refreshStatus()
+      setPipelineRunning(false)
+    }
   }
 
   const handleVerifyGreedy = async () => {
@@ -275,8 +288,8 @@ export default function App() {
               </motion.div>
             )}
 
-            {/* Export dropdown */}
-            {reconcile && (
+            {/* Export dropdown — only shown when pipeline is fully idle */}
+            {reconcile && !loading && !pipelineRunning && (
               <div className="relative">
                 <button
                   onClick={() => setShowExportMenu(v => !v)}
@@ -366,12 +379,13 @@ export default function App() {
           hasReconcile={reconcile !== null}
           hasProposal={proposal !== null}
           onReconcile={handleReconcile}
-          onJudge={handleJudge}
+          onJudge={() => handleJudge(false)}
           onVerify={handleVerify}
           onVerifyGreedy={handleVerifyGreedy}
           onSeedDemo={handleSeedDemo}
           onReset={handleReset}
           loading={loading}
+          pipelineRunning={pipelineRunning}
         />
 
 
