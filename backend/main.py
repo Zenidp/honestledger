@@ -111,7 +111,9 @@ async def _ensure_default_rules(db: AsyncSession, tenant_id: str) -> RuleSet:
     """Make sure tenant has v0 and v1 rules; return current rules."""
     current = await crud.get_current_rule_version(db, tenant_id)
     if current:
-        return _rules_from_db(current)
+        ruleset = _rules_from_db(current)
+        register_rules(ruleset)  # ensure it's always in _RULES (survives cold start)
+        return ruleset
 
     # Seed defaults for new tenant
     for version, rules in _DEFAULT_RULES.items():
