@@ -795,8 +795,9 @@ async def export_reconcile(
 
     if format == "audit_pdf":
         if upload and upload.payments:
-            pb = {p["id"]: type("P", (), {"payer_name": p.get("payer_name",""), "amount": float(p.get("amount",0)), "date": p.get("date","")})() for p in upload.payments}
-            ib = {i["id"]: type("I", (), {"amount": float(i.get("amount",0))})() for i in upload.invoices}
+            pb = {_row_id(p, "id", "payment_id", "ID"): type("P", (), {"payer_name": p.get("payer_name",""), "amount": float(p.get("amount",0)), "date": p.get("date","")})() for p in upload.payments}
+            ib = {_row_id(i, "id", "invoice_id", "ID"): type("I", (), {"amount": float(i.get("amount",0))})() for i in upload.invoices}
+            pb.pop("", None); ib.pop("", None)
         else:
             pb = {p.id: p for p in load_payments()}
             ib = {i.id: i for i in load_invoices()}
