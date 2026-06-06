@@ -731,10 +731,19 @@ async def export_reconcile(
     slug = tenant.id[:8]
 
     # Build payment/invoice lookup — prefer uploaded data, fall back to built-in demo set
+    def _row_id(row: dict, *candidates) -> str:
+        """Get ID from a CSV row — tries multiple common column names."""
+        for k in candidates:
+            if k in row and row[k]:
+                return str(row[k])
+        return ""
+
     upload = await crud.get_latest_upload(db, tenant.id)
     if upload and upload.payments:
-        payments_by_id = {p["id"]: p for p in upload.payments}
-        invoices_by_id = {i["id"]: i for i in upload.invoices}
+        payments_by_id = {_row_id(p, "id", "payment_id", "ID"): p for p in upload.payments}
+        invoices_by_id = {_row_id(i, "id", "invoice_id", "ID"): i for i in upload.invoices}
+        payments_by_id.pop("", None)  # remove empty-key entries
+        invoices_by_id.pop("", None)
         def _payer(r): d = payments_by_id.get(r.get("payment_id", "")); return d or {}
         def _inv(r):
             mid = r.get("matched_invoice_id") or ""

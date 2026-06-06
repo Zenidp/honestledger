@@ -85,11 +85,15 @@ export const exportReconcile = (format: 'audit_csv' | 'accounting_csv' | 'audit_
   const ext = format === 'audit_pdf' ? 'pdf' : 'csv'
   const label = format === 'audit_csv' ? 'audit' : format === 'accounting_csv' ? 'accounting' : 'audit'
   fetch(url, { headers: { 'X-API-Key': key } })
-    .then(r => r.blob())
+    .then(r => {
+      if (!r.ok) throw new Error(`Export failed (${r.status})`)
+      return r.blob()
+    })
     .then(blob => {
       const link = document.createElement('a')
       link.href = URL.createObjectURL(blob)
       link.download = `reconciliation_${label}.${ext}`
       link.click()
     })
+    .catch(err => alert(err.message))
 }
