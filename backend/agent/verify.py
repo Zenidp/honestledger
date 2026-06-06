@@ -28,6 +28,33 @@ async def run_verify(
     if baseline_rules is None:
         baseline_rules = get_current_rules()
 
+    # Guard: no changes proposed → nothing to verify, skip all Gemini calls
+    if not proposal.changes:
+        base_train   = cached_baseline_train   if cached_baseline_train   is not None else 0.0
+        base_holdout = cached_baseline_holdout if cached_baseline_holdout is not None else 0.0
+        print("[verify] No rule changes in proposal — returning INCONCLUSIVE (already optimal)")
+        return VerifyReport(
+            rule_version=baseline_rules.version,
+            score_train=base_train,
+            score_holdout=base_holdout,
+            score_baseline_train=base_train,
+            score_baseline_holdout=base_holdout,
+            delta_train=0.0,
+            delta_holdout=0.0,
+            verdict=VerifyVerdict.INCONCLUSIVE,
+            explanation=(
+                "No rule changes were proposed — the agent reported 0 errors and the current rules "
+                "are already performing optimally. Verification skipped to avoid LLM noise. "
+                "No action needed."
+            ),
+            tier=2,
+            consecutive_failures=consecutive_failures,
+            score_frontier=None,
+            score_baseline_frontier=None,
+            delta_frontier=None,
+            frontier_passed=None,
+        )
+
     print(f"\n{'='*60}")
     print(f"VERIFY: {proposal.rule_version} vs baseline {baseline_rules.version}")
     print(f"{'='*60}")
