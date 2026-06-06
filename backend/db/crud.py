@@ -5,7 +5,7 @@ import secrets
 from sqlalchemy import select, delete, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.db.models import (
-    Tenant, ApiKey, TenantUpload, RuleVersion,
+    Tenant, ApiKey, TenantUpload, RuleVersion, TenantSchemaMapping,
     ReconcileResult, RuleProposal, VerifyReport, IterationRecord, Job,
 )
 
@@ -258,3 +258,37 @@ async def get_job(db: AsyncSession, job_id: str, tenant_id: str) -> Job | None:
         select(Job).where(Job.id == job_id, Job.tenant_id == tenant_id)
     )
     return result.scalar_one_or_none()
+
+
+# ── Schema Mappings ───────────────────────────────────────────────────────────
+
+async def get_schema_mapping(
+    db: AsyncSession, tenant_id: str, file_type: str
+) -> TenantSchemaMapping | None:
+    result = await db.execute(
+        select(TenantSchemaMapping)
+        .where(TenantSchemaMapping.tenant_id == tenant_id,
+               TenantSchemaMapping.file_type == file_type)
+        .order_by(TenantSchemaMapping.mapping_version.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def save_schema_mapping(
+    db: AsyncSession, tenant_id: str, file_type: str,
+    column_map: dict, schema_fingerprint: str
+) -> TenantSchemaMapping:
+    existing = await get_schema_mapping(db, tenant_id, file_type)
+    next_version = (existing.mapping_version + 1) if existing else 1
+    row = TenantSchemaMapping(
+        tenant_id=tenant_id,
+        file_type=file_type,
+        column_map=column_map,
+        schema_fingerprint=schema_fingerprint,
+        mapping_version=next_version,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return row

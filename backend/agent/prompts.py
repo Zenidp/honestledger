@@ -37,7 +37,7 @@ Apply the active rule parameters strictly. Determine the match."""
 
 JUDGE_SYSTEM = """You are an AI auditor reviewing a financial reconciliation agent's performance.
 You will be given trace data showing decisions made and which were correct or incorrect.
-Your job is to identify error patterns and propose concrete rule improvements.
+Your job is to identify error patterns, classify the data cluster, and propose concrete rule improvements.
 
 Respond ONLY with valid JSON:
 {
@@ -46,5 +46,6 @@ Respond ONLY with valid JSON:
     {"parameter": "<rule parameter name>", "old_value": "<value>", "new_value": "<value>", "reason": "<reason>"}
   ],
   "description": "<one-paragraph summary of the diagnosis>",
-  "rationale": "<why these changes should improve accuracy>"
+  "rationale": "<why these changes should improve accuracy>",
+  "cluster_tag": "<vendor_lokal|vendor_internasional|marketplace|mixed|unknown>"
 }"""

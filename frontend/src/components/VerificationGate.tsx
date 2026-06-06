@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { ShieldCheck, ShieldAlert, Shield } from 'lucide-react'
+import { ShieldCheck, ShieldAlert, Shield, ShieldOff } from 'lucide-react'
 import type { VerifyReport } from '../types'
 import { ProcessLog } from './ProcessLog'
 import { CountdownTimer } from './CountdownTimer'
@@ -59,7 +59,7 @@ const verdictConfig = {
   },
   REWARD_HACKING: {
     icon: ShieldAlert,
-    label: 'Reward Hacking',
+    label: 'Reward Hacking Detected',
     bg: 'bg-red-50',
     border: 'border-red-200',
     text: 'text-red-700',
@@ -72,6 +72,14 @@ const verdictConfig = {
     border: 'border-gray-200',
     text: 'text-gray-600',
     iconColor: 'text-gray-400',
+  },
+  HARD_BLOCK: {
+    icon: ShieldOff,
+    label: 'Hard Block — Admin Escalation Required',
+    bg: 'bg-orange-50',
+    border: 'border-orange-300',
+    text: 'text-orange-800',
+    iconColor: 'text-orange-500',
   },
 }
 
@@ -104,13 +112,45 @@ export function VerificationGate({ report, loading, logSteps = [], logRunning = 
               <ScoreBar label="Train accuracy"
                 baseline={report.score_baseline_train} score={report.score_train}
                 delta={report.delta_train} />
-              <ScoreBar label="Holdout accuracy"
+              <ScoreBar label="Holdout (anchor)"
                 baseline={report.score_baseline_holdout} score={report.score_holdout}
                 delta={report.delta_holdout} />
+              {report.score_frontier != null && report.score_baseline_frontier != null && report.delta_frontier != null && (
+                <div className="relative">
+                  <ScoreBar label="Holdout (frontier)"
+                    baseline={report.score_baseline_frontier} score={report.score_frontier}
+                    delta={report.delta_frontier} />
+                  <span className={`absolute right-0 top-0 text-xs px-1.5 py-0.5 rounded font-medium ${
+                    report.frontier_passed ? 'bg-teal-50 text-teal-600' : 'bg-red-50 text-red-500'
+                  }`}>
+                    {report.frontier_passed ? '✓ frontier ok' : '✗ frontier fail'}
+                  </span>
+                </div>
+              )}
             </div>
 
+            {/* Tier + consecutive failures badge */}
+            {(report.tier != null || report.consecutive_failures > 0) && (
+              <div className="flex items-center gap-2 text-xs">
+                {report.tier != null && (
+                  <span className={`px-2 py-0.5 rounded-full border font-medium ${
+                    report.tier === 1 ? 'bg-teal-50 text-teal-600 border-teal-200' :
+                    report.tier === 3 ? 'bg-orange-50 text-orange-700 border-orange-200' :
+                    'bg-yellow-50 text-yellow-700 border-yellow-200'
+                  }`}>
+                    Tier {report.tier}
+                  </span>
+                )}
+                {report.consecutive_failures > 0 && (
+                  <span className="px-2 py-0.5 rounded-full border bg-gray-50 text-gray-500 border-gray-200 font-medium">
+                    {report.consecutive_failures} inconclusive streak
+                  </span>
+                )}
+              </div>
+            )}
+
             {(() => {
-              const cfg = verdictConfig[report.verdict]
+              const cfg = verdictConfig[report.verdict] ?? verdictConfig['INCONCLUSIVE']
               const Icon = cfg.icon
               return (
                 <motion.div

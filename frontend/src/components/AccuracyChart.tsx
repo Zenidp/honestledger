@@ -11,6 +11,7 @@ interface Props {
 const verdictColor = (verdict: string) => {
   if (verdict === 'GENUINE_IMPROVEMENT') return '#14b8a6'
   if (verdict === 'REWARD_HACKING') return '#ef4444'
+  if (verdict === 'HARD_BLOCK') return '#f97316'
   return '#94a3b8'
 }
 
@@ -95,6 +96,7 @@ export function AccuracyChart({ history }: Props) {
               <div key={h.iteration} className={`text-xs px-2.5 py-1 rounded-full border font-medium ${
                 h.verdict === 'GENUINE_IMPROVEMENT' ? 'bg-teal-50 text-teal-700 border-teal-200' :
                 h.verdict === 'REWARD_HACKING' ? 'bg-red-50 text-red-600 border-red-200' :
+                h.verdict === 'HARD_BLOCK' ? 'bg-orange-50 text-orange-700 border-orange-200' :
                 'bg-gray-50 text-gray-500 border-gray-200'
               }`}>
                 #{h.iteration} {h.rule_version} → {h.action}

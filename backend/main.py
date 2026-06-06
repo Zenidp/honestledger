@@ -33,7 +33,7 @@ from backend.agent.rules import (
     _RULE_REGISTRY, _DEFAULT_RULES,
 )
 from backend.data.loader import (
-    load_payments, load_invoices, split_payments, load_ground_truth
+    load_payments, load_invoices, split_payments, load_ground_truth, schema_fingerprint
 )
 from backend.agent.reconcile import run_reconcile_batch
 from backend.agent.judge import run_judge
@@ -90,17 +90,21 @@ def _rules_from_db(rv) -> RuleSet:
         amount_tolerance_pct=c.get("amount_tolerance_pct", 0.005),
         date_tolerance_days=c.get("date_tolerance_days", 1),
         min_confidence=c.get("min_confidence", 0.9),
+        cluster_tag=c.get("cluster_tag"),
     )
 
 
 def _rules_to_dict(rules: RuleSet) -> dict:
-    return {
+    d = {
         "name_similarity_threshold": rules.name_similarity_threshold,
         "amount_tolerance_abs": rules.amount_tolerance_abs,
         "amount_tolerance_pct": rules.amount_tolerance_pct,
         "date_tolerance_days": rules.date_tolerance_days,
         "min_confidence": rules.min_confidence,
     }
+    if rules.cluster_tag:
+        d["cluster_tag"] = rules.cluster_tag
+    return d
 
 
 async def _ensure_default_rules(db: AsyncSession, tenant_id: str) -> RuleSet:
@@ -137,6 +141,12 @@ async def _record_iteration(db: AsyncSession, tenant_id: str, verify_report: Ver
         "verdict": vr.verdict.value,
         "action": action,
         "description": proposal.description if proposal else None,
+        "tier": vr.tier,
+        "consecutive_failures": vr.consecutive_failures,
+        "cluster_tag": proposal.cluster_tag if proposal else None,
+        "frontier_score": vr.score_frontier,
+        "delta_frontier": vr.delta_frontier,
+        "frontier_passed": vr.frontier_passed,
     })
 
 
@@ -151,17 +161,26 @@ def _report_to_dict(vr: VerifyReport) -> dict:
         "delta_holdout": vr.delta_holdout,
         "verdict": vr.verdict.value,
         "explanation": vr.explanation,
+        "tier": vr.tier,
+        "consecutive_failures": vr.consecutive_failures,
+        "score_frontier": vr.score_frontier,
+        "score_baseline_frontier": vr.score_baseline_frontier,
+        "delta_frontier": vr.delta_frontier,
+        "frontier_passed": vr.frontier_passed,
     }
 
 
 def _proposal_to_dict(p: RuleProposal) -> dict:
-    return {
+    d = {
         "rule_version": p.rule_version,
         "description": p.description,
         "changes": p.changes,
         "rationale": p.rationale,
         "proposed_by": getattr(p, "proposed_by", "judge"),
     }
+    if p.cluster_tag:
+        d["cluster_tag"] = p.cluster_tag
+    return d
 
 
 def _proposal_from_dict(d: dict) -> RuleProposal:
@@ -171,6 +190,7 @@ def _proposal_from_dict(d: dict) -> RuleProposal:
         changes=d.get("changes", []),
         rationale=d.get("rationale", ""),
         proposed_by=d.get("proposed_by", "judge"),
+        cluster_tag=d.get("cluster_tag"),
     )
 
 
@@ -185,6 +205,12 @@ def _verify_from_dict(d: dict) -> VerifyReport:
         delta_holdout=d["delta_holdout"],
         verdict=VerifyVerdict(d["verdict"]),
         explanation=d["explanation"],
+        tier=d.get("tier", 2),
+        consecutive_failures=d.get("consecutive_failures", 0),
+        score_frontier=d.get("score_frontier"),
+        score_baseline_frontier=d.get("score_baseline_frontier"),
+        delta_frontier=d.get("delta_frontier"),
+        frontier_passed=d.get("frontier_passed"),
     )
 
 
@@ -322,6 +348,7 @@ async def _cache_holdout_baseline(tenant_id: str, rules: RuleSet):
 
 async def _run_verify_job(job_id: str, tenant_id: str, proposal: RuleProposal, baseline_rules: RuleSet):
     from backend.db.database import AsyncSessionLocal
+    from sqlalchemy import select, update
     async with AsyncSessionLocal() as db:
         steps: list[str] = []
 
@@ -331,6 +358,10 @@ async def _run_verify_job(job_id: str, tenant_id: str, proposal: RuleProposal, b
 
         try:
             await _step("Initializing verification framework...")
+
+            # Fetch current consecutive failure count for this tenant
+            tenant_row = await db.get(Tenant, tenant_id)
+            current_failures = tenant_row.consecutive_verify_failures if tenant_row else 0
 
             # Use cached baseline scores if available to skip re-running baseline reconcile
             reconcile_row = await crud.get_latest_reconcile(db, tenant_id)
@@ -343,10 +374,26 @@ async def _run_verify_job(job_id: str, tenant_id: str, proposal: RuleProposal, b
 
             report = await run_verify(proposal, baseline_rules,
                                       cached_baseline_train=cached_train,
-                                      cached_baseline_holdout=cached_holdout)
+                                      cached_baseline_holdout=cached_holdout,
+                                      consecutive_failures=current_failures)
 
             await _step(f"Train score: {round(report.score_train * 100, 1)}%  |  Holdout score: {round(report.score_holdout * 100, 1)}%")
-            await _step(f"Delta holdout: {report.delta_holdout:+.1%}  →  Verdict: {report.verdict.value}")
+            tier_label = {1: "Tier 1 — Auto-resolve", 2: "Tier 2 — Flagged for review", 3: "Tier 3 — Hard Block"}.get(report.tier, "")
+            await _step(f"Delta holdout: {report.delta_holdout:+.1%}  →  {report.verdict.value}  [{tier_label}]")
+
+            # Update consecutive failure counter in DB
+            if report.verdict in (VerifyVerdict.GENUINE_IMPROVEMENT, VerifyVerdict.REWARD_HACKING):
+                new_failures = 0  # reset on decisive outcome
+            elif report.verdict in (VerifyVerdict.INCONCLUSIVE, VerifyVerdict.HARD_BLOCK):
+                new_failures = report.consecutive_failures
+            else:
+                new_failures = current_failures
+            if tenant_row:
+                await db.execute(
+                    update(Tenant).where(Tenant.id == tenant_id)
+                    .values(consecutive_verify_failures=new_failures)
+                )
+                await db.commit()
 
             report_dict = _report_to_dict(report)
             await crud.save_verify_report(db, tenant_id, report_dict)
@@ -358,8 +405,14 @@ async def _run_verify_job(job_id: str, tenant_id: str, proposal: RuleProposal, b
                 await _record_iteration(db, tenant_id, report, p, "rejected")
                 await crud.clear_proposal(db, tenant_id)
                 await crud.clear_verify_report(db, tenant_id)
+            elif report.verdict == VerifyVerdict.HARD_BLOCK:
+                await _step("🚫 HARD BLOCK — escalated to admin. Processing frozen for this batch.")
+                proposal_row = await crud.get_latest_proposal(db, tenant_id)
+                p = _proposal_from_dict(proposal_row.proposal) if proposal_row else proposal
+                await _record_iteration(db, tenant_id, report, p, "hard_blocked")
             else:
-                await _step("✓ Genuine improvement confirmed — awaiting human approval.")
+                tier_msg = "eligible for auto-resolve" if report.tier == 1 else "awaiting human approval"
+                await _step(f"✓ Genuine improvement confirmed — {tier_msg}.")
 
             await crud.update_job(db, job_id, tenant_id, status="done", result=report_dict, progress={"steps": steps})
         except Exception as e:
@@ -424,6 +477,91 @@ async def status(
     }
 
 
+# ── Drift Monitor ──────────────────────────────────────────────────────────────
+
+# Trigger thresholds (Point 2 — Trigger Threshold architecture)
+DRIFT_GRADUAL_DROP = 0.08    # >8% accuracy drop over rolling window → trigger
+DRIFT_SPIKE_DROP = 0.05      # >5% accuracy drop in last 2 reconcile runs → trigger
+DRIFT_MIN_RECORDS = 3        # minimum reconcile records needed for drift analysis
+
+@app.get("/status/drift")
+async def drift_status(
+    db: AsyncSession = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    """Analyse rolling accuracy from reconcile history and report drift signals.
+
+    Returns whether gradual drift or sudden spike thresholds are met,
+    along with the raw accuracy history for charting.
+    """
+    from sqlalchemy import select as _select
+    from backend.db.models import ReconcileResult as RRModel
+
+    rows = await db.execute(
+        _select(RRModel)
+        .where(RRModel.tenant_id == tenant.id)
+        .order_by(RRModel.created_at.asc())
+    )
+    records = rows.scalars().all()
+
+    if len(records) < DRIFT_MIN_RECORDS:
+        return {
+            "drift_detected": False,
+            "gradual_drift": False,
+            "sudden_spike": False,
+            "reason": f"Insufficient history ({len(records)}/{DRIFT_MIN_RECORDS} reconcile runs needed).",
+            "accuracy_history": [{"accuracy": r.accuracy, "rule_version": r.rule_version} for r in records],
+        }
+
+    accuracies = [r.accuracy for r in records if r.accuracy is not None]
+    if not accuracies:
+        return {"drift_detected": False, "reason": "No accuracy data recorded yet."}
+
+    # Baseline: accuracy when the current rule version first activated
+    current_rv = await crud.get_current_rule_version(db, tenant.id)
+    current_version = current_rv.version if current_rv else "v0"
+    baseline_records = [r for r in records if r.rule_version == current_version]
+    baseline_acc = baseline_records[0].accuracy if baseline_records else accuracies[0]
+
+    latest_acc = accuracies[-1]
+    gradual_drop = baseline_acc - latest_acc
+
+    # Sudden spike: compare last two runs
+    spike_drop = (accuracies[-2] - accuracies[-1]) if len(accuracies) >= 2 else 0.0
+
+    gradual_drift = gradual_drop > DRIFT_GRADUAL_DROP
+    sudden_spike = spike_drop > DRIFT_SPIKE_DROP
+    drift_detected = gradual_drift or sudden_spike
+
+    reasons = []
+    if gradual_drift:
+        reasons.append(f"Gradual drift: {gradual_drop:.1%} drop from baseline {baseline_acc:.1%} → {latest_acc:.1%}")
+    if sudden_spike:
+        reasons.append(f"Sudden spike: {spike_drop:.1%} drop between last two runs")
+
+    return {
+        "drift_detected": drift_detected,
+        "gradual_drift": gradual_drift,
+        "sudden_spike": sudden_spike,
+        "baseline_accuracy": round(baseline_acc, 4),
+        "latest_accuracy": round(latest_acc, 4),
+        "gradual_drop": round(gradual_drop, 4),
+        "spike_drop": round(spike_drop, 4),
+        "current_rule_version": current_version,
+        "consecutive_verify_failures": tenant.consecutive_verify_failures,
+        "reason": " | ".join(reasons) if reasons else "Accuracy within normal range.",
+        "thresholds": {
+            "gradual_drift_trigger": DRIFT_GRADUAL_DROP,
+            "sudden_spike_trigger": DRIFT_SPIKE_DROP,
+            "min_records": DRIFT_MIN_RECORDS,
+        },
+        "accuracy_history": [
+            {"accuracy": r.accuracy, "rule_version": r.rule_version, "created_at": r.created_at.isoformat()}
+            for r in records if r.accuracy is not None
+        ],
+    }
+
+
 # ── Upload ─────────────────────────────────────────────────────────────────────
 
 @app.post("/upload")
@@ -433,7 +571,7 @@ async def upload_data(
     db: AsyncSession = Depends(get_db),
     tenant: Tenant = Depends(get_tenant),
 ):
-    """Upload payments.csv and invoices.csv. Replaces previous upload for this tenant."""
+    """Upload payments.csv and invoices.csv. Detects schema drift vs previous uploads."""
     def parse_csv(content: bytes) -> list[dict]:
         text = content.decode("utf-8-sig")
         reader = csv.DictReader(io.StringIO(text))
@@ -453,12 +591,52 @@ async def upload_data(
     if not invoices:
         raise HTTPException(400, "invoices.csv is empty or invalid.")
 
+    # Schema drift detection
+    schema_warnings: list[dict] = []
+    for file_type, rows, filename in [
+        ("payments", payments, payments_file.filename),
+        ("invoices", invoices, invoices_file.filename),
+    ]:
+        cols = list(rows[0].keys()) if rows else []
+        fingerprint = schema_fingerprint(cols)
+        existing = await crud.get_schema_mapping(db, tenant.id, file_type)
+
+        if existing is None:
+            # First upload — save schema as baseline
+            auto_map = {c: c.lower().replace(" ", "_") for c in cols}
+            await crud.save_schema_mapping(db, tenant.id, file_type, auto_map, fingerprint)
+        elif existing.schema_fingerprint != fingerprint:
+            # Schema changed — detect what changed
+            old_cols = set(existing.column_map.keys())
+            new_cols = set(cols)
+            added = sorted(new_cols - old_cols)
+            removed = sorted(old_cols - new_cols)
+            schema_warnings.append({
+                "file": filename,
+                "file_type": file_type,
+                "schema_drift": True,
+                "previous_mapping_version": existing.mapping_version,
+                "columns_added": added,
+                "columns_removed": removed,
+                "message": (
+                    f"Schema changed in {filename}. "
+                    + (f"New columns: {added}. " if added else "")
+                    + (f"Removed columns: {removed}. " if removed else "")
+                    + "Previous column mapping may no longer apply. Please verify mapping."
+                ),
+            })
+            # Save new schema version
+            new_map = {c: c.lower().replace(" ", "_") for c in cols}
+            await crud.save_schema_mapping(db, tenant.id, file_type, new_map, fingerprint)
+
     await crud.save_upload(db, tenant.id, payments, invoices, {})
     return {
         "uploaded": True,
         "payments": len(payments),
         "invoices": len(invoices),
-        "note": "Ground truth not provided — accuracy scoring uses built-in dataset.",
+        "schema_warnings": schema_warnings,
+        "note": "Ground truth not provided — accuracy scoring uses built-in dataset."
+        if not schema_warnings else "Upload successful. Review schema warnings before reconciling.",
     }
 
 

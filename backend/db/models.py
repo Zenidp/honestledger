@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, Float, Integer, Text, DateTime, ForeignKey, JSON
+from sqlalchemy import String, Boolean, Float, Integer, Text, DateTime, ForeignKey, JSON, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.db.database import Base
 
@@ -21,6 +21,7 @@ class Tenant(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    consecutive_verify_failures: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
 
     api_keys: Mapped[list["ApiKey"]] = relationship(back_populates="tenant", cascade="all, delete")
     jobs: Mapped[list["Job"]] = relationship(back_populates="tenant", cascade="all, delete")
@@ -30,6 +31,7 @@ class Tenant(Base):
     iterations: Mapped[list["IterationRecord"]] = relationship(back_populates="tenant", cascade="all, delete")
     uploads: Mapped[list["TenantUpload"]] = relationship(back_populates="tenant", cascade="all, delete")
     rule_versions: Mapped[list["RuleVersion"]] = relationship(back_populates="tenant", cascade="all, delete")
+    schema_mappings: Mapped[list["TenantSchemaMapping"]] = relationship(back_populates="tenant", cascade="all, delete")
 
 
 class ApiKey(Base):
@@ -44,6 +46,21 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     tenant: Mapped["Tenant"] = relationship(back_populates="api_keys")
+
+
+class TenantSchemaMapping(Base):
+    """Stores column mapping configuration per tenant per file type. Versioned for drift detection."""
+    __tablename__ = "tenant_schema_mappings"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String, ForeignKey("tenants.id", ondelete="CASCADE"))
+    file_type: Mapped[str] = mapped_column(String, nullable=False)   # "payments" | "invoices"
+    column_map: Mapped[dict] = mapped_column(JSON, nullable=False)    # {"Date": "date", ...}
+    schema_fingerprint: Mapped[str] = mapped_column(String, nullable=False)  # hash of sorted column names
+    mapping_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    tenant: Mapped["Tenant"] = relationship(back_populates="schema_mappings")
 
 
 class TenantUpload(Base):

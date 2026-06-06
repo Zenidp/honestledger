@@ -70,11 +70,16 @@ export function RuleProposalCard({ proposal, loading, logSteps = [], logRunning 
               <p className="text-xs text-gray-500 leading-relaxed">{proposal.rationale}</p>
             </div>
 
-            <div className="flex items-center gap-2 pt-1">
+            <div className="flex items-center gap-2 pt-1 flex-wrap">
               <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded font-mono">
                 → {proposal.rule_version}
               </span>
               <span className="text-xs text-gray-400">proposed by {proposal.proposed_by}</span>
+              {proposal.cluster_tag && (
+                <span className="text-xs bg-blue-50 text-blue-600 border border-blue-200 px-2 py-0.5 rounded font-medium">
+                  cluster: {proposal.cluster_tag}
+                </span>
+              )}
             </div>
           </div>
         )}

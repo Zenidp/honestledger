@@ -1,6 +1,7 @@
-"""Load CSV datasets and split into train / holdout sets."""
+"""Load CSV datasets and split into train / holdout / frontier sets."""
 
 import csv
+import hashlib
 from pathlib import Path
 from backend.models.schemas import Payment, Invoice
 
@@ -50,10 +51,38 @@ def split_payments(payments: list[Payment]) -> tuple[list[Payment], list[Payment
     return train, holdout
 
 
+def get_frontier_payment_ids(payments: list[Payment] | None = None, frontier_pct: float = 0.25) -> set[str]:
+    """Return IDs of the most recent payments (frontier holdout — rotating 25% by date).
+
+    These payments form the 'rotating frontier' component of hybrid holdout verification.
+    Frontier payments may overlap with train/holdout sets; they represent the most recent
+    data distribution regardless of the static train/holdout split.
+    """
+    if payments is None:
+        payments = load_payments()
+    sorted_by_date = sorted(payments, key=lambda p: p.date, reverse=True)
+    frontier_count = max(1, int(len(sorted_by_date) * frontier_pct))
+    return {p.id for p in sorted_by_date[:frontier_count]}
+
+
+def schema_fingerprint(column_names: list[str]) -> str:
+    """Return a stable hash of sorted column names for schema drift detection."""
+    key = ",".join(sorted(column_names))
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
 def score_results(results, split: str = "train") -> tuple[float, int, int]:
-    """Compare MatchResult list against ground truth. Returns (accuracy, correct, total)."""
+    """Compare MatchResult list against ground truth. Returns (accuracy, correct, total).
+
+    For split="frontier": scores all results that appear in ground_truth regardless of their
+    labeled split (frontier payments overlap train/holdout — they are selected by date, not label).
+    """
     gt = load_ground_truth()
-    split_ids = {pid for pid, v in gt.items() if v["split"] == split}
+    if split in ("train", "holdout"):
+        split_ids = {pid for pid, v in gt.items() if v["split"] == split}
+    else:
+        # "frontier" or custom: score all payments present in ground truth
+        split_ids = set(gt.keys())
 
     correct = 0
     total = 0

@@ -24,6 +24,15 @@ def _build_judge_prompt(span_summary: str, error_analysis: str, current_rules: s
 
 Based on the trace data and error analysis above, identify error patterns and propose specific rule parameter changes to improve accuracy.
 Focus on PRECISE improvements — only change parameters where the trace evidence clearly supports it.
+
+Also assess the DATA CLUSTER for this batch. Classify the data pattern as one of:
+- "vendor_lokal" — Indonesian local vendors, long names, IDR amounts
+- "vendor_internasional" — International vendors, English names, abbreviations common
+- "marketplace" — E-commerce platforms (Tokopedia/Shopee), structured references
+- "mixed" — Mix of multiple patterns
+- "unknown" — Cannot determine from available data
+
+Include cluster_tag in your JSON response.
 """
 
 
@@ -85,6 +94,7 @@ def _parse_judge_response(raw: str, next_version: str) -> RuleProposal:
             description=data.get("description", "Judge proposal"),
             changes=changes,
             rationale=data.get("rationale", ""),
+            cluster_tag=data.get("cluster_tag"),
         )
     except Exception as e:
         return RuleProposal(
