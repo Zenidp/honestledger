@@ -30,7 +30,7 @@ from backend.models.schemas import (
 )
 from backend.agent.rules import (
     get_current_rules, get_current_version, apply_rule_proposal,
-    _RULE_REGISTRY, _DEFAULT_RULES,
+    register_rules, _RULE_REGISTRY, _DEFAULT_RULES,
 )
 from backend.data.loader import (
     load_payments, load_invoices, split_payments, load_ground_truth, schema_fingerprint
