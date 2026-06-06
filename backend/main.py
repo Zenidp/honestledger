@@ -237,6 +237,20 @@ def _reconcile_to_dict(r: ReconcileReport) -> dict:
 
 # ── PDF generation ────────────────────────────────────────────────────────────
 
+def _safe_pdf(s: str, max_len: int = 0) -> str:
+    """Sanitize text for fpdf2 latin-1 core fonts — replaces non-encodable chars."""
+    if not s:
+        return ""
+    # Common Unicode → ASCII substitutions first
+    for src, dst in [('…','...'),('’',"'"),('‘',"'"),
+                     ('“','"'),('”','"'),('–','-'),('—','--'),
+                     ('·','*'),('•','*'),('→','->'),('✓','v')]:
+        s = s.replace(src, dst)
+    # Encode to latin-1, replace anything else with '?'
+    s = s.encode('latin-1', errors='replace').decode('latin-1')
+    return s[:max_len] if max_len else s
+
+
 def _generate_audit_pdf(results: list, row, tenant_name: str,
                          payments_by_id: dict, invoices_by_id: dict,
                          reconciled_at: str) -> bytes:
@@ -257,7 +271,7 @@ def _generate_audit_pdf(results: list, row, tenant_name: str,
             self.set_font("Helvetica", "", 8)
             self.set_text_color(120, 120, 120)
             self.cell(0, 5,
-                f"Tenant: {tenant_name}   |   Rule: {row.rule_version}   |   {reconciled_at}",
+                _safe_pdf(f"Tenant: {tenant_name}   |   Rule: {row.rule_version}   |   {reconciled_at}"),
                 align="C", new_x="LMARGIN", new_y="NEXT")
             self.ln(3)
 
@@ -308,17 +322,15 @@ def _generate_audit_pdf(results: list, row, tenant_name: str,
         first_inv_id = matched_id.split("+")[0] if matched_id else ""
         invoice = invoices_by_id.get(first_inv_id)
 
-        payer = (payment.payer_name[:22] if payment else "")
+        payer = _safe_pdf(payment.payer_name[:22] if payment else "")
         amt = f"{payment.amount:,.0f}" if payment else ""
         date = payment.date if payment else ""
         decision = r.get("decision", "").upper()
-        inv_id = matched_id[:14] if matched_id else "—"
+        inv_id = _safe_pdf(matched_id[:14] if matched_id else "-")
         delta_val = ""
         if payment and invoice:
             delta_val = f"{payment.amount - invoice.amount:+,.0f}"
-        rationale = (r.get("rationale") or "")[:75]
-        if len(r.get("rationale") or "") > 75:
-            rationale += "…"
+        rationale = _safe_pdf((r.get("rationale") or ""), max_len=78)
 
         row_data = [r.get("payment_id", ""), payer, amt, date, decision, inv_id, delta_val, rationale]
         fill = i % 2 == 0
