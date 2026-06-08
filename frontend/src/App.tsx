@@ -9,6 +9,8 @@ import { RewardHackBanner } from './components/RewardHackBanner'
 import { ApprovalControls } from './components/ApprovalControls'
 import { AccuracyChart } from './components/AccuracyChart'
 import { ActionBar } from './components/ActionBar'
+import { PipelineSteps, derivePipelineSteps } from './components/PipelineSteps'
+import { NextStepsPanel } from './components/NextStepsPanel'
 import ApiKeyGate from './components/ApiKeyGate'
 import UploadPanel from './components/UploadPanel'
 
@@ -97,6 +99,13 @@ export default function App() {
     return () => clearInterval(interval)
   }, [authenticated, refreshStatus])
 
+  // Auto-dismiss error after 5 seconds
+  useEffect(() => {
+    if (!error) return
+    const t = setTimeout(() => setError(null), 5000)
+    return () => clearTimeout(t)
+  }, [error])
+
   const withLoading = async (key: string, fn: () => Promise<void>) => {
     setLoading(key)
     setError(null)
@@ -110,7 +119,17 @@ export default function App() {
     }
   }
 
+  const MAX_AUTO_ITERATIONS = 5  // INCONCLUSIVE retries per approval cycle
+  const MAX_AUTO_APPROVALS  = 5  // total auto-approve cycles before stopping
+
+  // Persist across re-renders without triggering re-render themselves
+  const autoApproveCountRef = useRef(0)
+  const nextVersionRef      = useRef(2)
+
   const handleReconcile = async () => {
+    // Reset loop counters on every fresh upload-triggered reconcile
+    autoApproveCountRef.current = 0
+    nextVersionRef.current = 2
     setPipelineRunning(true)
     const stop = startSimulatedLog(RECONCILE_STEPS)
     setLoading('reconcile'); setError(null)
@@ -118,7 +137,7 @@ export default function App() {
     try {
       const report = await api.runReconcile('train')
       stop()
-      setLogSteps([...RECONCILE_STEPS, `✓ Done — ${report.correct}/${report.total} matched (${Math.round(report.accuracy * 100)}% accuracy)`])
+      setLogSteps([...RECONCILE_STEPS, `✓ Done — ${report.correct}/${report.total} matched (${Math.round(report.accuracy * 100)}%)`])
       setReconcile(report)
       setProposal(null); setVerifyReport(null); setShowBanner(false)
       success = true
@@ -132,24 +151,60 @@ export default function App() {
     else setPipelineRunning(false)
   }
 
-  const handleJudge = async (autoChain = false) => {
-    const stop = startSimulatedLog(JUDGE_STEPS, 2500)
-    setLoading('judge'); setError(null)
-    let success = false
+  // Re-run reconcile using data already in DB (no upload needed) then continue loop
+  const handleReconcileLoop = async () => {
+    const stop = startSimulatedLog(RECONCILE_STEPS)
+    setLoading('reconcile'); setError(null)
+    let report: ReconcileReport | null = null
     try {
-      const p = await api.runJudge()
+      const r = await api.runReconcile('train')
       stop()
-      setLogSteps([...JUDGE_STEPS, `✓ Proposal generated — ${p.rule_version}`])
-      setProposal(p); setVerifyReport(null); setShowBanner(false)
-      success = true
+      setLogSteps([...RECONCILE_STEPS, `✓ Done — ${r.correct}/${r.total} matched (${Math.round(r.accuracy * 100)}%)`])
+      setReconcile(r)
+      report = r
     } catch (e: any) {
       stop()
       setError(e?.response?.data?.detail ?? e?.message ?? 'Unknown error')
     } finally {
       setLoading(null); await refreshStatus()
     }
-    if (success && autoChain) await handleVerify()
-    else if (!success && autoChain) setPipelineRunning(false)
+    if (!report) { setPipelineRunning(false); return }
+    if (report.accuracy >= 1.0) {
+      // 100% matched — system is perfect, stop looping
+      setPipelineRunning(false)
+      return
+    }
+    await handleJudge(true, nextVersionRef.current, 0)
+  }
+
+  const handleJudge = async (autoChain = false, versionNum = 2, iteration = 0) => {
+    const stop = startSimulatedLog(JUDGE_STEPS, 2500)
+    setLoading('judge'); setError(null)
+    let proposal: RuleProposal | null = null
+    try {
+      const nextVersion = `v${versionNum}`
+      nextVersionRef.current = versionNum
+      const p = await api.runJudge(nextVersion)
+      stop()
+      setLogSteps([...JUDGE_STEPS, `✓ Proposal generated — ${p.rule_version} (cycle ${autoApproveCountRef.current + 1}, iteration ${iteration + 1})`])
+      setProposal(p); setVerifyReport(null); setShowBanner(false)
+      proposal = p
+    } catch (e: any) {
+      stop()
+      setError(e?.response?.data?.detail ?? e?.message ?? 'Unknown error')
+    } finally {
+      setLoading(null); await refreshStatus()
+    }
+
+    if (!proposal) { if (autoChain) setPipelineRunning(false); return }
+
+    // Early stop: judge says nothing to change → already optimal
+    if (!proposal.changes || proposal.changes.length === 0) {
+      setPipelineRunning(false)
+      return
+    }
+
+    if (autoChain) await handleVerify(versionNum, iteration)
   }
 
   const pollJob = async (job_id: string, onDone: (result: VerifyReport) => void) => {
@@ -177,18 +232,48 @@ export default function App() {
     })
   }
 
-  const handleVerify = async () => {
+  const handleVerify = async (versionNum = 2, iteration = 0) => {
     setLoading('verify'); setError(null)
+    let result: VerifyReport | null = null
     try {
       const { job_id } = await api.runVerify()
-      await pollJob(job_id, result => {
-        setVerifyReport(result)
-        if (result.verdict === 'REWARD_HACKING') setShowBanner(true)
+      await pollJob(job_id, r => {
+        result = r
+        setVerifyReport(r)
+        if (r.verdict === 'REWARD_HACKING') setShowBanner(true)
       })
     } catch (e: any) {
       setError(e?.response?.data?.detail ?? e?.message ?? 'Unknown error')
+      setPipelineRunning(false)
+      return
     } finally {
       setLoading(null); await refreshStatus()
+    }
+
+    const verdict = result ? (result as VerifyReport).verdict : null
+
+    if (verdict === 'INCONCLUSIVE' && iteration + 1 < MAX_AUTO_ITERATIONS) {
+      // Keep trying: propose new rules and verify again
+      await handleJudge(true, versionNum + 1, iteration + 1)
+
+    } else if (verdict === 'GENUINE_IMPROVEMENT' && autoApproveCountRef.current < MAX_AUTO_APPROVALS) {
+      // Auto-approve: activate new rules, then re-run reconcile from DB and continue loop
+      autoApproveCountRef.current += 1
+      nextVersionRef.current = versionNum + 1
+      try {
+        await api.approveProposal()
+      } catch (approveErr: any) {
+        setError(approveErr?.response?.data?.detail ?? approveErr?.message ?? 'Auto-approve failed')
+        setPipelineRunning(false)
+        return
+      }
+      setProposal(null); setVerifyReport(null); setShowBanner(false)
+      await refreshHistory()
+      // Re-run reconcile with newly approved rules (data already in DB — no upload needed)
+      await handleReconcileLoop()
+
+    } else {
+      // Stop: HARD_BLOCK / REWARD_HACKING / max approvals reached / max iterations reached
       setPipelineRunning(false)
     }
   }
@@ -206,6 +291,7 @@ export default function App() {
     } finally { setLoading(null); await refreshStatus() }
   }
 
+  // Manual approve — only needed if auto-loop stopped before GENUINE_IMPROVEMENT
   const handleApprove = () => withLoading('approve', async () => {
     await api.approveProposal()
     setProposal(null); setVerifyReport(null); setShowBanner(false)
@@ -288,8 +374,8 @@ export default function App() {
               </motion.div>
             )}
 
-            {/* Export dropdown — only shown when pipeline is fully idle */}
-            {reconcile && !loading && !pipelineRunning && (
+            {/* Export dropdown — shown whenever there are results */}
+            {reconcile && (
               <div className="relative">
                 <button
                   onClick={() => setShowExportMenu(v => !v)}
@@ -370,26 +456,47 @@ export default function App() {
         {/* Upload panel (collapsible) */}
         {showUpload && (
           <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}>
-            <UploadPanel onUploaded={() => { setShowUpload(false); refreshStatus() }} />
+            <UploadPanel onUploaded={() => { setShowUpload(false); handleReconcile() }} />
           </motion.div>
         )}
+
+        {/* Pipeline step tracker */}
+        {(() => {
+          const isOptimal = proposal !== null && (!proposal.changes || proposal.changes.length === 0)
+          const steps = derivePipelineSteps({
+            hasReconcile: reconcile !== null,
+            hasProposal: proposal !== null,
+            isOptimal,
+            hasVerify: verifyReport !== null,
+            verifyVerdict: verifyReport?.verdict,
+            loading,
+            reconcileAccuracy: reconcile?.accuracy,
+            proposalVersion: proposal?.rule_version,
+          })
+          return <PipelineSteps steps={steps} />
+        })()}
 
         <ActionBar
           status={status}
           hasReconcile={reconcile !== null}
-          hasProposal={proposal !== null}
+          hasProposal={proposal !== null && (!proposal.changes || proposal.changes.length === 0) === false}
+          isOptimal={proposal !== null && (!proposal.changes || proposal.changes.length === 0)}
+          verifyVerdict={verifyReport?.verdict}
           onReconcile={handleReconcile}
           onJudge={() => handleJudge(false)}
-          onVerify={handleVerify}
+          onVerify={() => handleVerify()}
           onVerifyGreedy={handleVerifyGreedy}
+          onApprove={handleApprove}
+          onReject={handleReject}
           onSeedDemo={handleSeedDemo}
           onReset={handleReset}
           loading={loading}
           pipelineRunning={pipelineRunning}
         />
 
-
+        {/* Main 2-column layout — always stable, right panel persistent */}
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+          {/* Left: reconcile results + chart */}
           <div className="lg:col-span-3 space-y-5">
             <ReconcileTable
               report={reconcile}
@@ -399,25 +506,45 @@ export default function App() {
             />
             <AccuracyChart history={history} />
           </div>
+
+          {/* Right: always-visible panel stack — nothing disappears once shown */}
           <div className="lg:col-span-2 space-y-5">
-            <RuleProposalCard
-              proposal={proposal}
-              loading={loading === 'judge'}
-              logSteps={loading === 'judge' ? logSteps : []}
-              logRunning={loading === 'judge' ? logRunning : false}
+            {/* Always visible — updates content based on current step */}
+            <NextStepsPanel
+              hasReconcile={reconcile !== null}
+              hasProposal={proposal !== null && !!proposal.changes?.length}
+              isOptimal={proposal !== null && (!proposal.changes || proposal.changes.length === 0)}
             />
-            <VerificationGate
-              report={verifyReport}
-              loading={loading === 'verify' || loading === 'greedy'}
-              logSteps={loading === 'verify' || loading === 'greedy' ? logSteps : []}
-              logRunning={loading === 'verify' || loading === 'greedy' ? logRunning : false}
-            />
-            <ApprovalControls
-              verifyReport={verifyReport}
-              onApprove={handleApprove}
-              onReject={handleReject}
-              loading={loading === 'approve' || loading === 'reject'}
-            />
+
+            {/* Appears below once judge runs — stays visible */}
+            {(proposal || loading === 'judge') && (
+              <RuleProposalCard
+                proposal={proposal}
+                loading={loading === 'judge'}
+                logSteps={loading === 'judge' ? logSteps : []}
+                logRunning={loading === 'judge' ? logRunning : false}
+              />
+            )}
+
+            {/* Appears below once verify runs — stays visible */}
+            {(verifyReport || loading === 'verify' || loading === 'greedy') && (
+              <VerificationGate
+                report={verifyReport}
+                loading={loading === 'verify' || loading === 'greedy'}
+                logSteps={loading === 'verify' || loading === 'greedy' ? logSteps : []}
+                logRunning={loading === 'verify' || loading === 'greedy' ? logRunning : false}
+              />
+            )}
+
+            {/* Approval controls — appears after verify completes */}
+            {verifyReport && (
+              <ApprovalControls
+                verifyReport={verifyReport}
+                onApprove={handleApprove}
+                onReject={handleReject}
+                loading={loading === 'approve' || loading === 'reject'}
+              />
+            )}
           </div>
         </div>
 

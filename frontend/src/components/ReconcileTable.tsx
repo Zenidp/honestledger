@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircle2, XCircle, HelpCircle, ChevronDown, ChevronUp } from 'lucide-react'
+import { CheckCircle2, XCircle, HelpCircle, ChevronDown, ChevronUp, AlertTriangle, PlayCircle } from 'lucide-react'
 import type { ReconcileReport } from '../types'
 import { ProcessLog } from './ProcessLog'
-import { CountdownTimer } from './CountdownTimer'
+import { ElapsedTimer } from './ElapsedTimer'
 
 interface Props {
   report: ReconcileReport | null
@@ -53,27 +53,65 @@ export function ReconcileTable({ report, loading, logSteps = [], logRunning = fa
         {report && (
           <div className="text-right">
             <div className="text-2xl font-bold text-teal-600">{(report.accuracy * 100).toFixed(0)}%</div>
-            <div className="text-xs text-gray-400">{report.correct}/{report.total} correct</div>
+            <div className="text-xs text-gray-400">{report.correct}/{report.total} matched</div>
           </div>
         )}
       </div>
 
+      {report && (() => {
+        const unmatched = report.results.filter(r => r.decision === 'unmatched')
+        if (unmatched.length === 0) return null
+        return (
+          <div className="border-b border-amber-100 bg-amber-50 px-5 py-3">
+            <div className="flex items-center gap-2 mb-2">
+              <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+              <span className="text-xs font-semibold text-amber-800">
+                {unmatched.length} Payment{unmatched.length > 1 ? 's' : ''} Require Manual Review
+              </span>
+              <span className="text-xs text-amber-600">
+                — tidak dapat di-match otomatis, perlu investigasi tim keuangan
+              </span>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              {unmatched.map(r => (
+                <div key={r.payment_id} className="flex items-start gap-2 bg-white rounded-lg border border-amber-200 px-3 py-2">
+                  <XCircle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <span className="font-mono text-xs font-medium text-gray-700">{r.payment_id}</span>
+                    <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{r.rationale}</p>
+                  </div>
+                  <span className="ml-auto shrink-0 text-xs bg-amber-100 text-amber-700 border border-amber-200 rounded px-1.5 py-0.5 font-medium whitespace-nowrap">
+                    review manual
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })()}
+
       <div className="overflow-auto max-h-[420px] scrollbar-thin">
         {loading ? (
-          <div className="px-5 py-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm text-gray-400">
+          <div className="px-5 py-5">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2 text-sm text-gray-600 font-medium">
                 <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: 'linear' }}
-                  className="w-4 h-4 border-2 border-teal-400 border-t-transparent rounded-full shrink-0" />
-                Running reconciliation...
+                  className="w-4 h-4 border-2 border-teal-500 border-t-transparent rounded-full shrink-0" />
+                Running reconciliation…
               </div>
-              <CountdownTimer seconds={45} />
+              <ElapsedTimer running={loading} />
             </div>
             <ProcessLog steps={logSteps} running={logRunning} />
           </div>
         ) : !report ? (
-          <div className="flex items-center justify-center h-32 text-sm text-gray-400">
-            Click <span className="mx-1 font-mono bg-gray-100 px-1.5 py-0.5 rounded text-xs">Run Reconcile</span> to start
+          <div className="flex flex-col items-center justify-center h-40 gap-3 text-center px-8">
+            <div className="w-10 h-10 bg-teal-50 rounded-full flex items-center justify-center">
+              <PlayCircle className="w-5 h-5 text-teal-400" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-gray-600">No results yet</p>
+              <p className="text-xs text-gray-400 mt-0.5">Upload your CSV files, then click <span className="font-semibold text-teal-600">Run Reconcile</span> to start</p>
+            </div>
           </div>
         ) : (
           <table className="w-full text-xs">
@@ -98,7 +136,7 @@ export function ReconcileTable({ report, loading, logSteps = [], logRunning = fa
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ delay: i * 0.02 }}
                     onClick={() => toggle(r.payment_id)}
-                    className="hover:bg-gray-50 cursor-pointer transition-colors">
+                    className={`cursor-pointer transition-colors ${r.decision === 'unmatched' ? 'bg-amber-50/40 hover:bg-amber-50' : 'hover:bg-gray-50'}`}>
                     <td className="px-4 py-2.5 font-mono text-gray-700">{r.payment_id}</td>
                     <td className="px-4 py-2.5">
                       <DecisionBadge decision={r.decision} confidence={r.confidence} />

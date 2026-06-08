@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import ADMIN_SECRET
@@ -313,8 +314,15 @@ def _generate_audit_pdf(results: list, row, tenant_name: str,
     pdf.ln()
 
     pdf.set_font("Helvetica", "", 7)
+    line_h = 4.5   # line height for rationale wrapping
+    cell_pad = 2.0  # estimated horizontal padding per cell
+
     for i, r in enumerate(results):
-        pdf.set_fill_color(249, 250, 251) if i % 2 == 0 else pdf.set_fill_color(255, 255, 255)
+        fill = i % 2 == 0
+        if fill:
+            pdf.set_fill_color(249, 250, 251)
+        else:
+            pdf.set_fill_color(255, 255, 255)
         pdf.set_text_color(30, 30, 30)
 
         payment = payments_by_id.get(r.get("payment_id", ""))
@@ -326,34 +334,191 @@ def _generate_audit_pdf(results: list, row, tenant_name: str,
         amt = f"{payment.amount:,.0f}" if payment else ""
         date = payment.date if payment else ""
         decision = r.get("decision", "").upper()
-        inv_id = _safe_pdf(matched_id[:14] if matched_id else "-")
+        inv_id = _safe_pdf(matched_id[:20] if matched_id else "-")
         delta_val = ""
         if payment and invoice:
             delta_val = f"{payment.amount - invoice.amount:+,.0f}"
-        rationale = _safe_pdf((r.get("rationale") or ""), max_len=78)
+        rationale = _safe_pdf(r.get("rationale") or "")  # full text, no truncation
 
-        row_data = [r.get("payment_id", ""), payer, amt, date, decision, inv_id, delta_val, rationale]
-        fill = i % 2 == 0
-        for w, d in zip(col_w, row_data):
-            pdf.cell(w, 6, str(d), border=1, fill=fill)
-        pdf.ln()
+        row_data = [r.get("payment_id", ""), payer, amt, date, decision, inv_id, delta_val]
 
-    pdf.ln(4)
-    pdf.set_font("Helvetica", "I", 7)
-    pdf.set_text_color(150, 150, 150)
-    pdf.cell(0, 4, "* Rationale truncated. Full text available in Audit CSV export.")
+        # Count how many lines rationale needs at col_w[-1] width
+        rat_col_w = col_w[-1] - cell_pad
+        n_lines, line_buf = 1, ""
+        for word in rationale.split():
+            test = (line_buf + " " + word).strip() if line_buf else word
+            if pdf.get_string_width(test) > rat_col_w:
+                n_lines += 1
+                line_buf = word
+            else:
+                line_buf = test
+        row_h = max(6.0, n_lines * line_h + 1.0)
+
+        x0 = pdf.l_margin
+        y0 = pdf.get_y()
+
+        # Manual page break before drawing the row
+        if y0 + row_h > pdf.h - pdf.b_margin - 2:
+            pdf.add_page()
+            y0 = pdf.get_y()
+
+        # Draw fixed columns with full row height so borders align with rationale
+        x = x0
+        for w, d in zip(col_w[:-1], row_data):
+            pdf.set_xy(x, y0)
+            pdf.cell(w, row_h, str(d), border=1, fill=fill)
+            x += w
+
+        # Draw rationale with word-wrap
+        pdf.set_xy(x, y0)
+        pdf.multi_cell(col_w[-1], line_h, rationale, border=1, fill=fill)
+
+        # Advance cursor to start of next row
+        pdf.set_xy(x0, y0 + row_h)
 
     return bytes(pdf.output())
 
 
+# ── Uploaded data helpers ──────────────────────────────────────────────────────
+
+def _detect_field(row: dict, *candidates) -> str:
+    """Return value of first matching key (case-insensitive). Returns '' if none found."""
+    lower_map = {k.lower(): v for k, v in row.items()}
+    for c in candidates:
+        val = lower_map.get(c.lower(), "")
+        if val not in (None, ""):
+            return str(val)
+    return ""
+
+
+def _uploaded_to_payments(rows: list[dict]):
+    """Convert raw uploaded dict rows to Payment objects with flexible column detection."""
+    from backend.models.schemas import Payment
+    result = []
+    for r in rows:
+        pid   = _detect_field(r, "id","no_transaksi","payment_id","transaction_id","trx_id","ref_id")
+        date  = _detect_field(r, "date","tanggal","payment_date","transaction_date","tgl","trans_date")
+        pname = _detect_field(r, "payer_name","nama_pengirim","payer","from_name","sender","customer","pembayar")
+        amt   = _detect_field(r, "amount","nominal","total","jumlah","value","debit","jumlah_bayar")
+        ref   = _detect_field(r, "reference","keterangan","description","ref","memo","note","remarks","ket")
+        if not pid or not amt:
+            continue
+        try:
+            result.append(Payment(id=pid, date=date, payer_name=pname, amount=float(amt), reference=ref))
+        except (ValueError, TypeError):
+            continue
+    return result
+
+
+def _uploaded_to_invoices(rows: list[dict]):
+    """Convert raw uploaded dict rows to Invoice objects with flexible column detection."""
+    from backend.models.schemas import Invoice
+    result = []
+    for r in rows:
+        iid   = _detect_field(r, "id","no_invoice","invoice_id","invoice_number","inv_id","inv_no")
+        date  = _detect_field(r, "date","tanggal_invoice","invoice_date","tgl_invoice","tgl")
+        vname = _detect_field(r, "vendor_name","nama_vendor","vendor","supplier","company_name","supplier_name","nama_perusahaan")
+        amt   = _detect_field(r, "amount","total_tagihan","total","nominal","jumlah_tagihan","invoice_amount","jumlah")
+        invno = _detect_field(r, "invoice_number","no_invoice","inv_no","inv_number","invoice_no") or iid
+        if not iid or not amt:
+            continue
+        try:
+            result.append(Invoice(id=iid, date=date, vendor_name=vname, amount=float(amt), invoice_number=invno))
+        except (ValueError, TypeError):
+            continue
+    return result
+
+
+def _parse_upload_gt(rows: list[dict]) -> dict:
+    """Parse uploaded ground truth or reconciliation_report CSV to internal GT dict.
+
+    Supports two input formats:
+    1. Simple GT: columns payment_id, correct_invoice_id, split
+    2. Reconciliation report: columns no_transaksi_bank, no_invoice, status_rekonsiliasi
+    """
+    if not rows:
+        return {}
+    cols = set(rows[0].keys())
+
+    # Format 1: simple ground truth file
+    if "payment_id" in cols and "correct_invoice_id" in cols:
+        gt: dict = {}
+        for r in rows:
+            pid = r.get("payment_id", "").strip()
+            if pid and pid != "-":
+                gt[pid] = {
+                    "correct_invoice_id": (r.get("correct_invoice_id") or "none").strip(),
+                    "split": (r.get("split") or "train").strip() or "train",
+                }
+        return gt
+
+    # Format 2: reconciliation_report — aggregate split payment rows
+    gt = {}
+    pids_in_order: list[str] = []
+    for r in rows:
+        pid = _detect_field(r, "no_transaksi_bank", "payment_id", "transaction_id")
+        if not pid or pid == "-":
+            continue  # outstanding invoice row — no payment
+        status = _detect_field(r, "status_rekonsiliasi", "status", "decision").upper()
+        inv_id = _detect_field(r, "no_invoice", "invoice_id", "matched_invoice_id")
+
+        if status == "COCOK":
+            inv_id = inv_id if (inv_id and inv_id != "-") else "none"
+            if pid in gt:
+                existing = gt[pid]["correct_invoice_id"]
+                if inv_id != "none" and inv_id not in existing.split("+"):
+                    gt[pid]["correct_invoice_id"] = existing + "+" + inv_id
+            else:
+                gt[pid] = {"correct_invoice_id": inv_id, "split": "train"}
+                pids_in_order.append(pid)
+        elif status in ("TIDAK_COCOK", "PERLU_INVESTIGASI", "PEMBAYARAN_NON_INVOICE", "TIDAK_ADA_INVOICE"):
+            if pid not in gt:
+                gt[pid] = {"correct_invoice_id": "none", "split": "train"}
+                pids_in_order.append(pid)
+
+    # Auto-label last 30% of unique payment IDs as holdout
+    n = len(pids_in_order)
+    for pid in pids_in_order[int(n * 0.7):]:
+        gt[pid]["split"] = "holdout"
+
+    return gt
+
+
+async def _get_tenant_data(db, tenant_id: str):
+    """Return (payments, invoices, ground_truth) for a tenant.
+
+    Uses uploaded data from DB if available; falls back to built-in demo files.
+    """
+    upload = await crud.get_latest_upload(db, tenant_id)
+    if upload and upload.payments and upload.invoices:
+        payments = _uploaded_to_payments(upload.payments)
+        invoices = _uploaded_to_invoices(upload.invoices)
+        if payments and invoices:
+            gt = upload.ground_truth or {}
+            return payments, invoices, (gt if gt else None)
+    return load_payments(), load_invoices(), None
+
+
 # ── Background job runner ──────────────────────────────────────────────────────
 
-async def _cache_holdout_baseline(tenant_id: str, rules: RuleSet):
+async def _cache_holdout_baseline(tenant_id: str, rules: RuleSet, payments=None, invoices=None, ground_truth=None):
     """Background: score holdout baseline and cache in memory so verify skips re-running it."""
-    from backend.data.loader import split_payments, load_payments
+    from backend.data.loader import split_payments
     try:
-        _, holdout_payments = split_payments(load_payments())
-        report = await run_reconcile_batch(holdout_payments, split="holdout", rules=rules)
+        if payments is None:
+            payments = load_payments()
+
+        if ground_truth:
+            holdout_ids = {pid for pid, v in ground_truth.items() if v.get("split") == "holdout"}
+            holdout_payments = [p for p in payments if p.id in holdout_ids]
+        else:
+            _, holdout_payments = split_payments(payments)
+            if not holdout_payments:
+                cut = max(1, int(len(payments) * 0.7))
+                holdout_payments = payments[cut:] or payments
+
+        report = await run_reconcile_batch(holdout_payments, split="holdout", rules=rules,
+                                           invoices=invoices, ground_truth=ground_truth)
         _holdout_cache[tenant_id] = report.accuracy
         print(f"  [cache] Holdout baseline cached: {report.accuracy:.1%}", flush=True)
     except Exception as e:
@@ -373,6 +538,9 @@ async def _run_verify_job(job_id: str, tenant_id: str, proposal: RuleProposal, b
         try:
             await _step("Initializing verification framework...")
 
+            # Load tenant data (uploaded or demo)
+            all_payments, invoices, ground_truth = await _get_tenant_data(db, tenant_id)
+
             # Fetch current consecutive failure count for this tenant
             tenant_row = await db.get(Tenant, tenant_id)
             current_failures = tenant_row.consecutive_verify_failures if tenant_row else 0
@@ -389,7 +557,9 @@ async def _run_verify_job(job_id: str, tenant_id: str, proposal: RuleProposal, b
             report = await run_verify(proposal, baseline_rules,
                                       cached_baseline_train=cached_train,
                                       cached_baseline_holdout=cached_holdout,
-                                      consecutive_failures=current_failures)
+                                      consecutive_failures=current_failures,
+                                      payments=all_payments, invoices=invoices,
+                                      ground_truth=ground_truth)
 
             await _step(f"Train score: {round(report.score_train * 100, 1)}%  |  Holdout score: {round(report.score_holdout * 100, 1)}%")
             tier_label = {1: "Tier 1 — Auto-resolve", 2: "Tier 2 — Flagged for review", 3: "Tier 3 — Hard Block"}.get(report.tier, "")
@@ -582,10 +752,14 @@ async def drift_status(
 async def upload_data(
     payments_file: UploadFile = File(...),
     invoices_file: UploadFile = File(...),
+    ground_truth_file: Optional[UploadFile] = File(None),
     db: AsyncSession = Depends(get_db),
     tenant: Tenant = Depends(get_tenant),
 ):
-    """Upload payments.csv and invoices.csv. Detects schema drift vs previous uploads."""
+    """Upload payments.csv and invoices.csv (+ optional ground_truth / reconciliation_report).
+    Detects schema drift vs previous uploads.
+    ground_truth_file: simple GT (payment_id, correct_invoice_id, split) OR reconciliation_report.csv.
+    """
     def parse_csv(content: bytes) -> list[dict]:
         text = content.decode("utf-8-sig")
         reader = csv.DictReader(io.StringIO(text))
@@ -643,11 +817,24 @@ async def upload_data(
             new_map = {c: c.lower().replace(" ", "_") for c in cols}
             await crud.save_schema_mapping(db, tenant.id, file_type, new_map, fingerprint)
 
-    await crud.save_upload(db, tenant.id, payments, invoices, {})
+    # Parse optional ground truth / reconciliation report
+    gt: dict = {}
+    gt_rows_count = 0
+    if ground_truth_file:
+        try:
+            gt_bytes = await ground_truth_file.read()
+            gt_rows = parse_csv(gt_bytes)
+            gt = _parse_upload_gt(gt_rows)
+            gt_rows_count = len(gt)
+        except Exception as e:
+            print(f"[upload] Ground truth parse error (non-fatal): {e}", flush=True)
+
+    await crud.save_upload(db, tenant.id, payments, invoices, gt)
     return {
         "uploaded": True,
         "payments": len(payments),
         "invoices": len(invoices),
+        "ground_truth_entries": gt_rows_count,
         "schema_warnings": schema_warnings,
         "note": "Ground truth not provided — accuracy scoring uses built-in dataset."
         if not schema_warnings else "Upload successful. Review schema warnings before reconciling.",
@@ -694,11 +881,27 @@ async def reconcile(
             raise HTTPException(404, f"Rule version '{req.rule_version}' not found.")
         rules = _rules_from_db(rv)
 
-    payments, _ = split_payments(load_payments()) if req.split == "train" else (load_payments(), [])
-    if req.split == "holdout":
-        _, payments = split_payments(load_payments())
+    all_payments, invoices, ground_truth = await _get_tenant_data(db, tenant.id)
 
-    report = await run_reconcile_batch(payments, split=req.split, rules=rules)
+    if req.split == "train":
+        if ground_truth:
+            train_ids = {pid for pid, v in ground_truth.items() if v.get("split") == "train"}
+            payments = [p for p in all_payments if p.id in train_ids] or all_payments
+        else:
+            train, _ = split_payments(all_payments)
+            payments = train or all_payments
+    elif req.split == "holdout":
+        if ground_truth:
+            holdout_ids = {pid for pid, v in ground_truth.items() if v.get("split") == "holdout"}
+            payments = [p for p in all_payments if p.id in holdout_ids]
+        else:
+            _, holdout = split_payments(all_payments)
+            payments = holdout or all_payments
+    else:
+        payments = all_payments
+
+    report = await run_reconcile_batch(payments, split=req.split, rules=rules,
+                                       invoices=invoices, ground_truth=ground_truth)
     report_dict = _reconcile_to_dict(report)
     row = await crud.save_reconcile_result(db, tenant.id, {
         "results": report_dict["results"],
@@ -708,9 +911,18 @@ async def reconcile(
         "rule_version": report.rule_version,
     })
 
+    # Reset failure streak on new reconcile so stale HARD_BLOCK doesn't bleed into fresh sessions
+    if req.split in ("train", None):
+        await db.execute(
+            update(Tenant).where(Tenant.id == tenant.id).values(consecutive_verify_failures=0)
+        )
+        await db.commit()
+
     # Background: score holdout baseline so verify can skip re-running it
     if req.split == "train":
-        asyncio.create_task(_cache_holdout_baseline(tenant.id, rules))
+        asyncio.create_task(_cache_holdout_baseline(tenant.id, rules,
+                                                    payments=all_payments, invoices=invoices,
+                                                    ground_truth=ground_truth))
 
     return report_dict
 
@@ -752,24 +964,23 @@ async def export_reconcile(
 
     upload = await crud.get_latest_upload(db, tenant.id)
     if upload and upload.payments:
-        payments_by_id = {_row_id(p, "id", "payment_id", "ID"): p for p in upload.payments}
-        invoices_by_id = {_row_id(i, "id", "invoice_id", "ID"): i for i in upload.invoices}
-        payments_by_id.pop("", None)  # remove empty-key entries
+        payments_by_id = {_detect_field(p, "id","no_transaksi","payment_id","transaction_id","trx_id","ref_id"): p for p in upload.payments}
+        invoices_by_id = {_detect_field(i, "id","no_invoice","invoice_id","invoice_number","inv_id","inv_no"): i for i in upload.invoices}
+        payments_by_id.pop("", None)
         invoices_by_id.pop("", None)
-        def _payer(r): d = payments_by_id.get(r.get("payment_id", "")); return d or {}
+        def _payer(r): return payments_by_id.get(r.get("payment_id", "")) or {}
         def _inv(r):
             mid = r.get("matched_invoice_id") or ""
             fid = mid.split("+")[0] if mid else ""
             return invoices_by_id.get(fid) or {}
-        def _amount(d, key): return float(d.get(key) or 0) if d else 0
+        def _pname(r): return _detect_field(_payer(r), "payer_name","nama_pengirim","payer","from_name","sender","customer")
+        def _pamount(r): v = _detect_field(_payer(r), "amount","nominal","total","jumlah","value","debit"); return float(v) if v else ""
+        def _pdate(r): return _detect_field(_payer(r), "date","tanggal","payment_date","transaction_date","tgl")
+        def _iamount(r): v = _detect_field(_inv(r), "amount","total_tagihan","total","nominal","jumlah_tagihan","jumlah"); return float(v) if v else ""
         def _delta(r):
-            p = _payer(r); i = _inv(r)
-            if p and i: return round(_amount(p, "amount") - _amount(i, "amount"), 2)
+            pa = _pamount(r); ia = _iamount(r)
+            if pa != "" and ia != "": return round(float(pa) - float(ia), 2)
             return None
-        def _pname(r): return (_payer(r) or {}).get("payer_name", "")
-        def _pamount(r): return _amount(_payer(r), "amount") or ""
-        def _pdate(r): return (_payer(r) or {}).get("date", "")
-        def _iamount(r): return _amount(_inv(r), "amount") or ""
     else:
         _payments = {p.id: p for p in load_payments()}
         _invoices = {i.id: i for i in load_invoices()}
@@ -852,6 +1063,11 @@ async def judge(
         raise HTTPException(400, "No reconcile results. POST /reconcile first.")
 
     rules = await _get_current_rules_for_tenant(db, tenant.id)
+    all_payments, invoices, ground_truth = await _get_tenant_data(db, tenant.id)
+    payments_by_id = {p.id: p for p in all_payments}
+
+    iteration_rows = await crud.get_iterations(db, tenant.id)
+    iteration_history = [r.data for r in iteration_rows]
 
     results = [
         MatchResult(
@@ -864,12 +1080,18 @@ async def judge(
         for r in reconcile_row.results
     ]
 
-    proposal = await run_judge(results, rules, next_version=req.next_version)
+    proposal = await run_judge(results, rules, next_version=req.next_version,
+                               invoices=invoices, payments_by_id=payments_by_id,
+                               iteration_history=iteration_history)
     proposal_dict = _proposal_to_dict(proposal)
 
-    await crud.save_proposal(db, tenant.id, proposal_dict)
-    await crud.upsert_rule_version(db, tenant.id, proposal.rule_version,
-                                    _rules_to_dict(apply_rule_proposal(proposal, rules.version)))
+    # Use a fresh session — the original `db` connection may have timed out
+    # during the long Gemini call (Supabase drops idle connections after ~60s)
+    from backend.db.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as fresh_db:
+        await crud.save_proposal(fresh_db, tenant.id, proposal_dict)
+        await crud.upsert_rule_version(fresh_db, tenant.id, proposal.rule_version,
+                                        _rules_to_dict(apply_rule_proposal(proposal, rules.version)))
     return proposal_dict
 
 

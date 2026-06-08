@@ -9,6 +9,9 @@ engine = create_async_engine(
     DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
+    pool_recycle=60,       # recycle connections every 60s — prevents Supabase idle timeout
+    pool_size=5,
+    max_overflow=2,
     connect_args={"statement_cache_size": 0},  # required for PgBouncer / Supabase Session pooler
 )
 

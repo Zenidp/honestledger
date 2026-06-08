@@ -7,11 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 def setup_phoenix_tracing() -> None:
-    """Register Phoenix OTEL tracer with BatchSpanProcessor (non-blocking).
-
-    Uses BatchSpanProcessor so trace export never blocks Gemini calls.
-    Fails gracefully if Phoenix is unreachable — app still works without tracing.
-    """
+    """Register Phoenix OTEL tracer via OTEL + BatchSpanProcessor."""
     try:
         from phoenix.otel import register
         from opentelemetry.sdk.trace.export import BatchSpanProcessor

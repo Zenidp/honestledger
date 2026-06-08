@@ -1,122 +1,215 @@
 import { motion } from 'framer-motion'
-import { Play, Brain, Shield, AlertTriangle, RefreshCw, Loader2, Zap } from 'lucide-react'
+import {
+  Play, Brain, Shield, AlertTriangle, RefreshCw,
+  Loader2, Zap, ChevronRight, CheckCircle2, XCircle,
+} from 'lucide-react'
 import type { AppStatus } from '../types'
 
 interface Props {
   status: AppStatus | null
   hasReconcile: boolean
   hasProposal: boolean
+  isOptimal: boolean
+  verifyVerdict?: string | null
   onReconcile: () => void
   onJudge: () => void
   onVerify: () => void
   onVerifyGreedy: () => void
+  onApprove?: () => void
+  onReject?: () => void
   onSeedDemo: () => void
   onReset: () => void
   loading: string | null
   pipelineRunning: boolean
 }
 
-type Variant = 'primary' | 'secondary' | 'danger' | 'ghost' | 'active-judge' | 'active-verify'
-
-interface BtnProps {
+interface PrimaryCTA {
   label: string
+  sublabel: string
   icon: React.ReactNode
   onClick: () => void
-  loading?: boolean
-  disabled?: boolean
-  variant?: Variant
+  variant: 'teal' | 'amber' | 'indigo' | 'green' | 'red'
+  loadingKey?: string
 }
 
-function ActionButton({ label, icon, onClick, loading, disabled, variant = 'secondary' }: BtnProps) {
-  const base = 'flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-all'
-  const styles: Record<Variant, string> = {
-    primary:        'bg-teal-600 text-white hover:bg-teal-700 shadow-sm',
-    secondary:      'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50',
-    danger:         'bg-red-50 text-red-600 border border-red-200 hover:bg-red-100',
-    ghost:          'text-gray-400 hover:text-gray-600 hover:bg-gray-50',
-    'active-judge': 'bg-amber-500 text-white shadow-sm',
-    'active-verify':'bg-indigo-500 text-white shadow-sm',
+function PrimaryButton({ cta, isLoading }: { cta: PrimaryCTA; isLoading: boolean }) {
+  const variants = {
+    teal:   'bg-teal-600 hover:bg-teal-700 text-white shadow-teal-100',
+    amber:  'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-100',
+    indigo: 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-100',
+    green:  'bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-100',
+    red:    'bg-red-500 hover:bg-red-600 text-white shadow-red-100',
   }
-
   return (
-    <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
-      onClick={onClick} disabled={disabled || loading}
-      className={`${base} ${styles[variant]} ${(disabled || loading) ? 'opacity-50 cursor-not-allowed' : ''}`}>
-      {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : icon}
-      {label}
+    <motion.button
+      whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
+      onClick={cta.onClick}
+      disabled={isLoading}
+      className={`flex items-center gap-3 px-5 py-2.5 rounded-xl text-sm font-semibold shadow-lg transition-all
+        ${variants[cta.variant]} ${isLoading ? 'opacity-75 cursor-not-allowed' : ''}`}
+    >
+      <span className="flex items-center gap-2">
+        {isLoading
+          ? <Loader2 className="w-4 h-4 animate-spin" />
+          : cta.icon}
+        <span className="flex flex-col items-start leading-tight">
+          <span>{cta.label}</span>
+          <span className="text-[10px] font-normal opacity-80">{cta.sublabel}</span>
+        </span>
+      </span>
+      {!isLoading && <ChevronRight className="w-4 h-4 opacity-70" />}
     </motion.button>
   )
 }
 
+function SmallButton({
+  label, icon, onClick, loading = false, disabled = false, variant = 'ghost',
+}: {
+  label: string; icon: React.ReactNode; onClick: () => void
+  loading?: boolean; disabled?: boolean; variant?: 'ghost' | 'danger' | 'neutral'
+}) {
+  const variants = {
+    ghost:   'text-gray-400 hover:text-gray-600 hover:bg-gray-50 border-transparent',
+    neutral: 'text-gray-600 border-gray-200 hover:bg-gray-50 bg-white',
+    danger:  'text-red-500 border-red-200 hover:bg-red-50 bg-white',
+  }
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled || loading}
+      title={label}
+      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors
+        ${variants[variant]} ${disabled || loading ? 'opacity-40 cursor-not-allowed' : ''}`}
+    >
+      {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : icon}
+      <span className="hidden sm:inline">{label}</span>
+    </button>
+  )
+}
+
+function OptimalBadge() {
+  return (
+    <motion.div
+      initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+      className="flex items-center gap-2.5 px-4 py-2.5 bg-emerald-50 border border-emerald-200 rounded-xl"
+    >
+      <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0" />
+      <div>
+        <p className="text-sm font-semibold text-emerald-800">System Optimal</p>
+        <p className="text-xs text-emerald-600">AI Judge verified no further rule improvements are possible</p>
+      </div>
+    </motion.div>
+  )
+}
+
 export function ActionBar({
-  status, hasReconcile, hasProposal,
-  onReconcile, onJudge, onVerify, onVerifyGreedy,
+  status, hasReconcile, hasProposal, isOptimal, verifyVerdict,
+  onReconcile, onJudge, onVerify, onVerifyGreedy, onApprove, onReject,
   onSeedDemo, onReset,
   loading, pipelineRunning,
 }: Props) {
-  // During auto-chain, all pipeline buttons are blocked
-  const pipelineBlocked = pipelineRunning || !!loading
+  const anyLoading = !!loading
+  const blocked    = pipelineRunning || anyLoading
+
+  // Derive the primary CTA based on pipeline state
+  let primaryCTA: PrimaryCTA | null = null
+
+  if (!hasReconcile) {
+    primaryCTA = {
+      label: 'Run Reconcile', sublabel: 'Start the AI pipeline',
+      icon: <Play className="w-4 h-4" />, onClick: onReconcile,
+      variant: 'teal', loadingKey: 'reconcile',
+    }
+  } else if (!hasProposal && !isOptimal) {
+    primaryCTA = {
+      label: 'Run AI Judge', sublabel: 'Analyze errors & propose rules',
+      icon: <Brain className="w-4 h-4" />, onClick: onJudge,
+      variant: 'amber', loadingKey: 'judge',
+    }
+  } else if (hasProposal && !isOptimal) {
+    primaryCTA = {
+      label: 'Verify Proposal', sublabel: 'Test on holdout data',
+      icon: <Shield className="w-4 h-4" />, onClick: onVerify,
+      variant: 'indigo', loadingKey: 'verify',
+    }
+  } else if (verifyVerdict === 'GENUINE_IMPROVEMENT' && onApprove) {
+    primaryCTA = {
+      label: 'Approve & Activate', sublabel: 'Apply improved rules',
+      icon: <CheckCircle2 className="w-4 h-4" />, onClick: onApprove,
+      variant: 'green', loadingKey: 'approve',
+    }
+  } else if (verifyVerdict === 'REWARD_HACKING' && onReject) {
+    primaryCTA = {
+      label: 'Reject Proposal', sublabel: 'Rules degraded holdout',
+      icon: <XCircle className="w-4 h-4" />, onClick: onReject,
+      variant: 'red', loadingKey: 'reject',
+    }
+  }
+
+  const primaryLoading = primaryCTA ? loading === primaryCTA.loadingKey : false
+  const showPipeline   = blocked && !primaryLoading
 
   return (
-    <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-5 py-3 space-y-2">
+    <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3 space-y-2.5">
+
       <div className="flex items-center justify-between gap-4">
-        {/* Pipeline buttons */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <ActionButton
-            label="Run Reconcile"
-            icon={<Play className="w-3.5 h-3.5" />}
-            onClick={onReconcile}
-            loading={loading === 'reconcile'}
-            disabled={pipelineBlocked && loading !== 'reconcile'}
-            variant="primary"
-          />
-
-          <ActionButton
-            label="Run Judge"
-            icon={<Brain className="w-3.5 h-3.5" />}
-            onClick={onJudge}
-            loading={loading === 'judge'}
-            disabled={pipelineBlocked && loading !== 'judge' || !hasReconcile}
-            variant={loading === 'judge' ? 'active-judge' : 'secondary'}
-          />
-
-          <ActionButton
-            label="Verify Proposal"
-            icon={<Shield className="w-3.5 h-3.5" />}
-            onClick={onVerify}
-            loading={loading === 'verify'}
-            disabled={pipelineBlocked && loading !== 'verify' || !hasProposal}
-            variant={loading === 'verify' ? 'active-verify' : 'secondary'}
-          />
-
-          <ActionButton
-            label="Greedy Attack"
-            icon={<AlertTriangle className="w-3.5 h-3.5" />}
-            onClick={onVerifyGreedy}
-            loading={loading === 'greedy'}
-            disabled={pipelineBlocked && loading !== 'greedy'}
-            variant="danger"
-          />
+        {/* Primary CTA */}
+        <div className="flex items-center gap-3">
+          {isOptimal && !blocked ? (
+            <OptimalBadge />
+          ) : showPipeline ? (
+            <div className="flex items-center gap-2 text-sm text-gray-500">
+              <Loader2 className="w-4 h-4 animate-spin text-teal-500" />
+              <span>Pipeline running automatically…</span>
+            </div>
+          ) : primaryCTA ? (
+            <PrimaryButton cta={primaryCTA} isLoading={primaryLoading} />
+          ) : null}
         </div>
 
+        {/* Secondary utilities */}
         <div className="flex items-center gap-2">
           {status && (
-            <div className="text-xs text-gray-500 font-mono hidden sm:block">
-              rules: <span className="text-teal-600 font-medium">{status.current_rule_version}</span>
-            </div>
+            <span className="text-xs text-gray-400 font-mono hidden md:block">
+              rules: <span className="text-teal-600 font-semibold">{status.current_rule_version}</span>
+              {status.iteration_count > 0 && (
+                <span className="ml-1.5 text-gray-300">· {status.iteration_count} iter</span>
+              )}
+            </span>
           )}
-          <ActionButton label="Reset" icon={<RefreshCw className="w-3.5 h-3.5" />}
-            onClick={onReset} disabled={pipelineBlocked} variant="ghost" />
+
+          <SmallButton
+            label="Greedy Attack"
+            icon={<AlertTriangle className="w-3 h-3" />}
+            onClick={onVerifyGreedy}
+            loading={loading === 'greedy'}
+            disabled={blocked && loading !== 'greedy'}
+            variant="danger"
+          />
+
+          <SmallButton
+            label="Reset"
+            icon={<RefreshCw className="w-3 h-3" />}
+            onClick={() => { if (confirm('Reset all history and results?')) onReset() }}
+            disabled={blocked}
+            variant="ghost"
+          />
         </div>
       </div>
 
-      {/* Demo mode row */}
+      {/* Demo row */}
       <div className="flex items-center gap-2 pt-1 border-t border-gray-100">
-        <span className="text-xs text-gray-400 font-medium">Demo mode:</span>
-        <ActionButton label="⚡ Seed Full Demo (instant)" icon={<Zap className="w-3.5 h-3.5" />}
-          onClick={onSeedDemo} loading={loading === 'seed'}
-          variant="secondary" />
-        <span className="text-xs text-gray-300">Loads pre-computed results — no Gemini calls, perfect for recording</span>
+        <span className="text-[11px] text-gray-400 font-medium shrink-0">Demo:</span>
+        <SmallButton
+          label="⚡ Seed instant demo"
+          icon={<Zap className="w-3 h-3" />}
+          onClick={onSeedDemo}
+          loading={loading === 'seed'}
+          variant="neutral"
+        />
+        <span className="text-[11px] text-gray-300 hidden sm:block">
+          Pre-computed results — no Gemini calls, ideal for live demos
+        </span>
       </div>
     </div>
   )

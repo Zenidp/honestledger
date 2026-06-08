@@ -172,12 +172,23 @@ async def _reconcile_one(idx: int, total: int, payment, invoices, rules: RuleSet
                        confidence=0.0, rationale="Max retries exceeded")
 
 
-async def run_reconcile_batch(payments, split: str = "train", rules: RuleSet = None) -> ReconcileReport:
-    """Async: reconcile all payments in parallel (semaphore-limited) and return a scored report."""
+async def run_reconcile_batch(
+    payments,
+    split: str = "train",
+    rules: RuleSet = None,
+    invoices=None,
+    ground_truth: dict | None = None,
+) -> ReconcileReport:
+    """Async: reconcile all payments in parallel (semaphore-limited) and return a scored report.
+
+    invoices: optional list of Invoice objects; falls back to load_invoices() if None.
+    ground_truth: optional dict override; falls back to file-based GT if None.
+    """
     if rules is None:
         rules = get_current_rules()
+    if invoices is None:
+        invoices = load_invoices()
 
-    invoices = load_invoices()
     total = len(payments)
     print(f"  Reconciling {total} payments in parallel (split={split})...", flush=True)
 
@@ -187,13 +198,19 @@ async def run_reconcile_batch(payments, split: str = "train", rules: RuleSet = N
     ]
     results = list(await asyncio.gather(*tasks))
 
-    accuracy, correct, scored_total = score_results(results, split=split)
-    print(f"  Score: {correct}/{scored_total} = {accuracy:.1%}", flush=True)
+    accuracy, correct, scored_total = score_results(results, split=split, gt=ground_truth)
+
+    if scored_total == 0:
+        # No ground truth — use match rate as the reported metric
+        correct = sum(1 for r in results if r.decision.value == "matched")
+        accuracy = round(correct / len(results), 4) if results else 0.0
+
+    print(f"  Score: {correct}/{len(results)} = {accuracy:.1%}", flush=True)
 
     return ReconcileReport(
         results=results,
         accuracy=accuracy,
-        total=scored_total,
+        total=len(results),
         correct=correct,
         rule_version=rules.version if rules else get_current_version(),
     )

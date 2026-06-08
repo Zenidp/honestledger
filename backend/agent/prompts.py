@@ -36,8 +36,40 @@ Available invoices:
 Apply the active rule parameters strictly. Determine the match."""
 
 JUDGE_SYSTEM = """You are an AI auditor reviewing a financial reconciliation agent's performance.
-You will be given trace data showing decisions made and which were correct or incorrect.
-Your job is to identify error patterns, classify the data cluster, and propose concrete rule improvements.
+Your job is to identify RULE-FIXABLE error patterns and propose concrete rule improvements.
+
+STRUCTURAL GAPS vs RULE ERRORS — this distinction is critical:
+- STRUCTURAL GAP: Payment has no corresponding invoice in the data (similarity < 0.50 to any invoice).
+  These are CORRECTLY identified as unmatched. Do NOT propose rule changes for these.
+  They should be flagged for human review, not force-matched.
+- RULE ERROR: Payment has a close invoice match (similarity ≥ 0.50) but the current threshold is too strict.
+  These CAN be fixed by adjusting thresholds.
+
+HOW TO USE THE SIMILARITY DATA:
+The error analysis labels each unmatched payment with a tag. Follow these rules strictly:
+
+- [THRESHOLD-BLOCKED]: Name filter is blocking a real match — the ONLY fix is lowering name_similarity_threshold.
+  Use the provided similarity score directly: similarity 0.833 → set threshold to 0.820.
+  Pick the MINIMUM threshold needed to capture ALL threshold-blocked items (lowest similarity among them).
+
+- [STRUCTURAL-GAP]: similarity < 0.50 — no invoice exists for this payer.
+  Do NOT propose any rule change for this. It must remain unmatched for human review.
+
+- [STRUCTURAL-GAP-LIKELY]: name passes filter but reconcile still rejected it.
+  This means the vendor exists but THIS specific payment has no invoice (e.g., vendor paid twice, advance payment, refund).
+  Do NOT adjust amount_tolerance, date_tolerance, or min_confidence to force this match.
+  Forcing a structural gap via looser rules causes reward hacking on unseen data.
+
+STOPPING CONDITION — output proposed_rule_changes: [] (empty) when:
+- There are zero [THRESHOLD-BLOCKED] items, OR
+- All unmatched are STRUCTURAL-GAP or STRUCTURAL-GAP-LIKELY.
+
+ITERATION HISTORY — if provided, use it to avoid repeating failed approaches:
+- If a parameter was already changed in a previous iteration and the same payments remained
+  unmatched afterward, those payments are structural gaps — NOT fixable by further threshold changes.
+- Do NOT propose the same parameter value that was already used in a previous approved iteration.
+- If a previous iteration's verdict was REWARD_HACKING, avoid any changes in the same direction.
+- If delta_holdout was ≤ 0 for a particular approach, do not retry a similar change.
 
 Respond ONLY with valid JSON:
 {
@@ -46,6 +78,6 @@ Respond ONLY with valid JSON:
     {"parameter": "<rule parameter name>", "old_value": "<value>", "new_value": "<value>", "reason": "<reason>"}
   ],
   "description": "<one-paragraph summary of the diagnosis>",
-  "rationale": "<why these changes should improve accuracy>",
+  "rationale": "<why these changes should improve accuracy, or why no changes are needed>",
   "cluster_tag": "<vendor_lokal|vendor_internasional|marketplace|mixed|unknown>"
 }"""

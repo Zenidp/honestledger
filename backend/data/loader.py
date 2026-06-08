@@ -71,13 +71,15 @@ def schema_fingerprint(column_names: list[str]) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
-def score_results(results, split: str = "train") -> tuple[float, int, int]:
+def score_results(results, split: str = "train", gt: dict | None = None) -> tuple[float, int, int]:
     """Compare MatchResult list against ground truth. Returns (accuracy, correct, total).
 
     For split="frontier": scores all results that appear in ground_truth regardless of their
     labeled split (frontier payments overlap train/holdout — they are selected by date, not label).
+    Accepts optional gt override (dict) to avoid reloading from file when using uploaded data.
     """
-    gt = load_ground_truth()
+    if gt is None:
+        gt = load_ground_truth()
     if split in ("train", "holdout"):
         split_ids = {pid for pid, v in gt.items() if v["split"] == split}
     else:

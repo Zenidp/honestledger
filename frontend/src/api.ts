@@ -69,10 +69,11 @@ export const seedDemo = () => api.post('/demo/seed').then(r => r.data)
 export const seedHacking = () => api.post('/demo/seed-hacking').then(r => r.data)
 
 // Upload CSV files
-export const uploadData = (paymentsFile: File, invoicesFile: File) => {
+export const uploadData = (paymentsFile: File, invoicesFile: File, groundTruthFile?: File | null) => {
   const form = new FormData()
   form.append('payments_file', paymentsFile)
   form.append('invoices_file', invoicesFile)
+  if (groundTruthFile) form.append('ground_truth_file', groundTruthFile)
   return api.post('/upload', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   }).then(r => r.data)

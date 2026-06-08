@@ -1,0 +1,31 @@
+id,date,payer_name,amount,reference
+TRX-001,2024-01-05,PT Mitra Solusi Digital,15000000,Invoice Layanan IT Januari 2024
+TRX-002,2024-01-08,Teknologi Maju Indo,8500000,Pembayaran Proyek Alpha - abbrev nama
+TRX-003,2024-01-10,CV Sumber Makmur Jaya,24987500,Tagihan Bulanan Jan - dipotong biaya transfer bank
+TRX-004,2024-01-14,PT Aneka Niaga Persada,12000000,Pelunasan Invoice - terlambat 2 hari dari jatuh tempo
+TRX-005,2024-01-15,Bangunan Sentossa,5750000,Jasa Konstruksi Minor - typo satu huruf
+TRX-006,2024-01-18,Global Tech Solusi,18000000,Software License Q1 2024 - campuran EN-ID
+TRX-007,2024-01-20,PT Karya Utama Mandiri,33500000,Pembayaran Sekaligus 2 Invoice Jan 2024
+TRX-008,2024-01-22,UD Berkah Bersama,7200000,Pembelian Alat Kantor - nama beda prefix
+TRX-009,2024-01-25,PT Indo Grafika Perkasa,9999999,Invoice Cetak Brosur - selisih Rp1 pembulatan
+TRX-010,2024-01-28,Mandiri Logistik,29987500,Pengiriman Bulanan - nama singkat + fee + beda tanggal
+TRX-011,2024-02-01,PT Cahaya Bintang Timur,75000000,Kontrak Tahunan 2024
+TRX-012,2024-02-03,Sumber Rejeki,4500000,Pembelian ATK - nama stripped tanpa CV
+TRX-013,2024-02-05,PT Nusantara Prima Sejahtera,49987500,Jasa Konsultasi Q4 2023 - dipotong fee admin
+TRX-014,2024-02-08,Prima Karya Indonesia,11500000,Service Maintenance - nama berbeda signifikan
+TRX-015,2024-02-12,PT Sentral Media Utama,22000000,Biaya Iklan Media Digital - terlambat 3 hari
+TRX-016,2024-02-14,Jasa Konstruksi Bakti,38000000,Pekerjaan Sipil Tahap II
+TRX-017,2024-02-17,PT Mega Jaya Corp,6800000,Komponen Elektronik - kata tengah beda (Jaya vs Karya)
+TRX-018,2024-02-20,Agung Sejahtera,45000000,Proyek Integrasi ERP - tanpa PT dan Group
+TRX-019,2024-02-22,PT Bumi Aksara Nusantara,20000000,DP Proyek Gedung Baru 2024 - belum ada invoice
+TRX-020,2024-02-24,Tokopedia Refund,3250000,Refund Order TK-8821-REF - bukan invoice vendor
+TRX-021,2024-02-26,Ahmad Fauzi,15000000,Transfer salah kirim - bukan transaksi vendor
+TRX-022,2024-02-25,PT Fortuna Perkasa,17500000,Invoice Layanan Konsultasi Feb 2024
+TRX-023,2024-02-27,Jaya Mitra,9300000,Pengiriman Elektronik - nama sangat terpotong (HARDEST)
+TRX-024,2024-03-01,CV Berkah Mandiri Sejahtera,13247500,Tagihan Maret 2024 - selisih Rp2500
+TRX-025,2024-03-03,PT Cahaya Digital Perdana,22000000,Transfer tidak dikenal - tidak ada invoice
+TRX-026,2024-03-05,SENTOSA JAYA TEKNIK,27000000,Invoice Q1 2024 - nama semua kapital
+TRX-027,2024-03-08,PT Sinar Harapan Baru,32000000,Kontrak Proyek Infrastruktur - ada invoice decoy
+TRX-028,2024-03-10,Media Prima Advertising,8800000,Iklan Kampanye Maret - bayar 2 hari sebelum invoice
+TRX-029,2024-03-15,Logistik Express Indonesia,59987500,Pengiriman Nasional Mar - nama singkat + fee
+TRX-030,2024-03-18,PT Konstruksi Raya,50000000,DP Renovasi Kantor Pusat - belum ada invoice
