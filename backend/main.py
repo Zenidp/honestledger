@@ -1296,7 +1296,9 @@ async def reject(
 ):
     verify_row = await crud.get_latest_verify_report(db, tenant.id)
     if not verify_row:
-        raise HTTPException(400, "No verify report to reject.")
+        # Already auto-rejected by REWARD_HACKING flow — just ensure proposal is cleared too
+        await crud.clear_proposal(db, tenant.id)
+        return {"rejected": True}
     report = _verify_from_dict(verify_row.report)
     proposal_row = await crud.get_latest_proposal(db, tenant.id)
     p = _proposal_from_dict(proposal_row.proposal) if proposal_row else None

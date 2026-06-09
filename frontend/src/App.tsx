@@ -300,11 +300,15 @@ export default function App() {
     await refreshHistory()
   })
 
-  const handleReject = () => withLoading('reject', async () => {
-    await api.rejectProposal()
+  const handleReject = async () => {
+    // Clear frontend state immediately — backend may have already auto-rejected (REWARD_HACKING)
+    try { await api.rejectProposal() } catch { /* idempotent — already cleared server-side is OK */ }
     setProposal(null); setVerifyReport(null); setShowBanner(false)
+    setPipelineRunning(true)
     await refreshHistory()
-  })
+    // Auto-restart judge so iteration memory can propose a better approach
+    await handleJudge(true, nextVersionRef.current)
+  }
 
   const handleSeedDemo = () => withLoading('seed', async () => {
     await api.seedDemo()
