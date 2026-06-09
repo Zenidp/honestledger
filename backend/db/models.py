@@ -140,31 +140,14 @@ class IterationRecord(Base):
     tenant: Mapped["Tenant"] = relationship(back_populates="iterations")
 
 
-class OAuthUser(Base):
-    """Google OAuth users — each maps 1-to-1 with a Tenant."""
-    __tablename__ = "oauth_users"
+class UserRegistration(Base):
+    """Self-signup users — each maps 1-to-1 with a Tenant."""
+    __tablename__ = "user_registrations"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
-    google_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=True)
-    picture: Mapped[str] = mapped_column(String, nullable=True)
     tenant_id: Mapped[str] = mapped_column(String, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-
-
-class PendingReveal(Base):
-    """Short-lived record that holds a raw API key for one-time display after OAuth login."""
-    __tablename__ = "pending_reveals"
-
-    token_hash: Mapped[str] = mapped_column(String, primary_key=True)  # SHA256 of raw token
-    tenant_id: Mapped[str] = mapped_column(String, ForeignKey("tenants.id", ondelete="CASCADE"))
-    api_key_raw: Mapped[str] = mapped_column(String, nullable=False)
-    user_email: Mapped[str] = mapped_column(String, nullable=True)
-    user_name: Mapped[str] = mapped_column(String, nullable=True)
-    user_picture: Mapped[str] = mapped_column(String, nullable=True)
-    is_new_user: Mapped[bool] = mapped_column(Boolean, default=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

@@ -1,88 +1,35 @@
-import { useState, useEffect } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import { ShieldCheck, Copy, CheckCircle, AlertTriangle, Eye, EyeOff, ArrowRight, RefreshCw } from 'lucide-react'
+import { useState } from 'react'
+import { motion } from 'framer-motion'
+import { ShieldCheck, Copy, CheckCircle, AlertTriangle, Eye, EyeOff, ArrowRight } from 'lucide-react'
 import { setApiKey } from '../api'
 
-interface RevealData {
-  api_key: string
-  user_email: string
-  user_name: string
-  user_picture: string
-  is_new_user: boolean
-}
-
 interface Props {
-  revealToken: string
+  apiKey: string
+  userName: string
+  userEmail: string
   onDone: () => void
 }
 
-export default function ApiKeyReveal({ revealToken, onDone }: Props) {
-  const [data, setData]         = useState<RevealData | null>(null)
-  const [loading, setLoading]   = useState(true)
-  const [error, setError]       = useState<string | null>(null)
-  const [copied, setCopied]     = useState(false)
+export default function ApiKeyReveal({ apiKey, userName, userEmail, onDone }: Props) {
+  const [copied, setCopied]       = useState(false)
   const [confirmed, setConfirmed] = useState(false)
-  const [visible, setVisible]   = useState(false)
-
-  useEffect(() => {
-    fetch(`/api/auth/reveal?token=${encodeURIComponent(revealToken)}`)
-      .then(r => {
-        if (r.status === 410) throw new Error('Link expired or already used. Please sign in again.')
-        if (!r.ok) throw new Error('Failed to retrieve API key.')
-        return r.json()
-      })
-      .then(d => { setData(d); setLoading(false) })
-      .catch(e => { setError(e.message); setLoading(false) })
-  }, [revealToken])
+  const [visible, setVisible]     = useState(false)
 
   const handleCopy = () => {
-    if (!data) return
-    navigator.clipboard.writeText(data.api_key).then(() => {
+    navigator.clipboard.writeText(apiKey).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 3000)
     })
   }
 
   const handleEnterDashboard = () => {
-    if (!data || !confirmed) return
-    setApiKey(data.api_key)
-    // Clean URL params
-    window.history.replaceState({}, '', window.location.pathname)
+    if (!confirmed) return
+    setApiKey(apiKey)
     onDone()
   }
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
-        <div className="flex items-center gap-3 text-slate-400">
-          <RefreshCw className="w-5 h-5 animate-spin" />
-          <span className="text-sm">Retrieving your API key…</span>
-        </div>
-      </div>
-    )
-  }
-
-  if (error) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl p-8 max-w-md w-full text-center">
-          <AlertTriangle className="w-10 h-10 text-red-500 mx-auto mb-4" />
-          <h2 className="text-xl font-bold text-gray-900 mb-2">Link Expired</h2>
-          <p className="text-sm text-gray-500 mb-6">{error}</p>
-          <a href="/api/auth/google"
-            className="inline-flex items-center gap-2 px-6 py-2.5 bg-teal-600 text-white rounded-lg text-sm font-medium hover:bg-teal-700 transition-colors">
-            Sign in again
-          </a>
-        </div>
-      </div>
-    )
-  }
-
-  if (!data) return null
-
   return (
     <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
-      {/* Background glow */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-teal-500/5 rounded-full blur-3xl" />
       </div>
@@ -93,18 +40,12 @@ export default function ApiKeyReveal({ revealToken, onDone }: Props) {
         className="relative bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden"
       >
         {/* Top banner */}
-        <div className={`px-8 py-5 ${data.is_new_user ? 'bg-teal-600' : 'bg-amber-500'}`}>
+        <div className="px-8 py-5 bg-teal-600">
           <div className="flex items-center gap-3">
             <ShieldCheck className="w-6 h-6 text-white" />
             <div>
-              <p className="text-white font-bold text-base">
-                {data.is_new_user ? 'Welcome to HonestLedger!' : 'New API key generated'}
-              </p>
-              <p className="text-white/80 text-xs mt-0.5">
-                {data.is_new_user
-                  ? 'Your account has been created successfully.'
-                  : 'Your previous key has been revoked. Here is your new key.'}
-              </p>
+              <p className="text-white font-bold text-base">Welcome to HonestLedger!</p>
+              <p className="text-white/80 text-xs mt-0.5">Your account has been created successfully.</p>
             </div>
           </div>
         </div>
@@ -112,16 +53,12 @@ export default function ApiKeyReveal({ revealToken, onDone }: Props) {
         <div className="px-8 py-6 space-y-5">
           {/* User info */}
           <div className="flex items-center gap-3">
-            {data.user_picture ? (
-              <img src={data.user_picture} alt="" className="w-10 h-10 rounded-full" />
-            ) : (
-              <div className="w-10 h-10 rounded-full bg-teal-100 flex items-center justify-center">
-                <span className="text-teal-700 font-bold text-sm">{(data.user_name || 'U')[0].toUpperCase()}</span>
-              </div>
-            )}
+            <div className="w-10 h-10 rounded-full bg-teal-100 flex items-center justify-center">
+              <span className="text-teal-700 font-bold text-sm">{(userName || 'U')[0].toUpperCase()}</span>
+            </div>
             <div>
-              <p className="font-semibold text-gray-900 text-sm">{data.user_name}</p>
-              <p className="text-xs text-gray-500">{data.user_email}</p>
+              <p className="font-semibold text-gray-900 text-sm">{userName}</p>
+              <p className="text-xs text-gray-500">{userEmail}</p>
             </div>
           </div>
 
@@ -133,7 +70,7 @@ export default function ApiKeyReveal({ revealToken, onDone }: Props) {
                 <p className="text-sm font-bold text-red-700">This key will NEVER be shown again</p>
                 <p className="text-xs text-red-600 mt-1 leading-relaxed">
                   Copy it now and store it in a password manager or a secure location.
-                  Once you leave this page, this key cannot be recovered — you would need to sign in again to generate a new one.
+                  Once you leave this page, this key cannot be recovered.
                 </p>
               </div>
             </div>
@@ -144,7 +81,7 @@ export default function ApiKeyReveal({ revealToken, onDone }: Props) {
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2 block">Your API Key</label>
             <div className="flex items-center gap-2 bg-slate-900 rounded-xl px-4 py-3 font-mono">
               <span className="flex-1 text-sm text-green-400 break-all select-all">
-                {visible ? data.api_key : data.api_key.slice(0, 6) + '•'.repeat(data.api_key.length - 10) + data.api_key.slice(-4)}
+                {visible ? apiKey : apiKey.slice(0, 6) + '•'.repeat(apiKey.length - 10) + apiKey.slice(-4)}
               </span>
               <button onClick={() => setVisible(v => !v)}
                 className="p-1.5 text-slate-400 hover:text-white transition-colors">
@@ -159,7 +96,8 @@ export default function ApiKeyReveal({ revealToken, onDone }: Props) {
 
           {/* Confirmation checkbox */}
           <label className="flex items-start gap-3 cursor-pointer group">
-            <div className={`mt-0.5 w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 transition-colors ${confirmed ? 'bg-teal-600 border-teal-600' : 'border-gray-300 group-hover:border-teal-400'}`}
+            <div
+              className={`mt-0.5 w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 transition-colors ${confirmed ? 'bg-teal-600 border-teal-600' : 'border-gray-300 group-hover:border-teal-400'}`}
               onClick={() => setConfirmed(c => !c)}>
               {confirmed && <CheckCircle className="w-3 h-3 text-white" />}
             </div>

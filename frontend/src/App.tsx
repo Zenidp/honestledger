@@ -38,14 +38,8 @@ const JUDGE_STEPS = [
 ]
 
 export default function App() {
-  // Check for OAuth redirect params in URL
-  const _urlParams = new URLSearchParams(window.location.search)
-  const _revealToken = _urlParams.get('reveal_token')
-  const _authError   = _urlParams.get('auth_error')
-
-  const [revealToken] = useState<string | null>(_revealToken)
-  const [authError]   = useState<string | null>(_authError)
-  const [authenticated, setAuthenticated] = useState(api.hasApiKey() && !_revealToken)
+  const [signupResult, setSignupResult] = useState<{ apiKey: string; name: string; email: string } | null>(null)
+  const [authenticated, setAuthenticated] = useState(api.hasApiKey())
   const [status, setStatus] = useState<AppStatus | null>(null)
   const [reconcile, setReconcile] = useState<ReconcileReport | null>(null)
   const [proposal, setProposal] = useState<RuleProposal | null>(null)
@@ -339,19 +333,26 @@ export default function App() {
     setVerifyReport(null); setHistory([])
   }
 
-  // ── OAuth reveal screen — intercept before anything else ────────────────────
-  if (revealToken) {
+  // ── Signup reveal screen — show API key once before entering dashboard ────────
+  if (signupResult) {
     return (
       <ApiKeyReveal
-        revealToken={revealToken}
-        onDone={() => setAuthenticated(true)}
+        apiKey={signupResult.apiKey}
+        userName={signupResult.name}
+        userEmail={signupResult.email}
+        onDone={() => { setSignupResult(null); setAuthenticated(true) }}
       />
     )
   }
 
   // ── Auth gate ────────────────────────────────────────────────────────────────
   if (!authenticated) {
-    return <LandingPage onLogin={() => setAuthenticated(true)} authError={authError} />
+    return (
+      <LandingPage
+        onLogin={() => setAuthenticated(true)}
+        onSignupSuccess={(apiKey, name, email) => setSignupResult({ apiKey, name, email })}
+      />
+    )
   }
 
   return (

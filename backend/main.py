@@ -14,12 +14,9 @@ import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import urlencode
-
-import httpx
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, RedirectResponse
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import update
@@ -680,101 +677,31 @@ async def list_keys(
 
 # ── Health & Status ────────────────────────────────────────────────────────────
 
-# ── Google OAuth config ────────────────────────────────────────────────────────
+# ── Self-signup ────────────────────────────────────────────────────────────────
 
-_GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
-_GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
-_BASE_URL             = os.environ.get("BASE_URL", "https://honestledger-482466571967.us-central1.run.app")
-_GOOGLE_REDIRECT_URI  = f"{_BASE_URL}/api/auth/google/callback"
-
-
-@app.get("/auth/google")
-async def auth_google():
-    """Redirect browser to Google OAuth consent screen."""
-    if not _GOOGLE_CLIENT_ID:
-        raise HTTPException(503, "Google OAuth not configured — GOOGLE_CLIENT_ID missing.")
-    params = {
-        "client_id": _GOOGLE_CLIENT_ID,
-        "redirect_uri": _GOOGLE_REDIRECT_URI,
-        "response_type": "code",
-        "scope": "openid email profile",
-        "prompt": "select_account",
-    }
-    return RedirectResponse("https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params))
+class SignupRequest(BaseModel):
+    name: str
+    email: str
 
 
-@app.get("/auth/google/callback")
-async def auth_google_callback(
-    code: str | None = None,
-    error: str | None = None,
-    db: AsyncSession = Depends(get_db),
-):
-    """Handle Google OAuth callback. Creates/updates user + tenant, issues reveal token."""
-    if error:
-        return RedirectResponse(f"{_BASE_URL}/?auth_error={error}")
-    if not code:
-        return RedirectResponse(f"{_BASE_URL}/?auth_error=no_code")
+@app.post("/auth/signup")
+async def auth_signup(body: SignupRequest, db: AsyncSession = Depends(get_db)):
+    """Create a new account and return the API key (shown once — store it safely)."""
+    email = body.email.strip().lower()
+    name  = body.name.strip() or email
 
-    # Exchange code → tokens → user info
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            tok = await client.post("https://oauth2.googleapis.com/token", data={
-                "code": code, "client_id": _GOOGLE_CLIENT_ID,
-                "client_secret": _GOOGLE_CLIENT_SECRET,
-                "redirect_uri": _GOOGLE_REDIRECT_URI, "grant_type": "authorization_code",
-            })
-            if tok.status_code != 200:
-                return RedirectResponse(f"{_BASE_URL}/?auth_error=token_failed")
-            access_token = tok.json().get("access_token", "")
-            ui = await client.get("https://www.googleapis.com/oauth2/v2/userinfo",
-                                  headers={"Authorization": f"Bearer {access_token}"})
-            user_info = ui.json()
-    except Exception:
-        return RedirectResponse(f"{_BASE_URL}/?auth_error=network_error")
+    if not email or "@" not in email:
+        raise HTTPException(400, "A valid email address is required.")
 
-    google_id = user_info.get("id", "")
-    email     = user_info.get("email", "")
-    name      = user_info.get("name") or email
-    picture   = user_info.get("picture", "")
+    existing = await crud.get_user_by_email(db, email)
+    if existing is not None:
+        raise HTTPException(409, "This email is already registered. Please use your existing API key.")
 
-    if not google_id or not email:
-        return RedirectResponse(f"{_BASE_URL}/?auth_error=user_info_missing")
+    tenant  = await crud.create_tenant(db, name)
+    raw_key, _ = await crud.create_api_key(db, tenant.id, name="primary")
+    await crud.create_user_registration(db, email, name, tenant.id)
 
-    # Find or create user + tenant
-    existing = await crud.get_oauth_user(db, google_id)
-    if existing is None:
-        # New user — create tenant + api key
-        tenant = await crud.create_tenant(db, name)
-        raw_key, _ = await crud.create_api_key(db, tenant.id, name="primary")
-        await crud.create_oauth_user(db, google_id, email, name, picture, tenant.id)
-        is_new = True
-        tenant_id = tenant.id
-    else:
-        # Returning user — revoke old keys, issue new one
-        await crud.revoke_all_tenant_keys(db, existing.tenant_id)
-        raw_key, _ = await crud.create_api_key(db, existing.tenant_id, name="primary")
-        is_new = False
-        tenant_id = existing.tenant_id
-
-    reveal_token = await crud.create_pending_reveal(
-        db, tenant_id, raw_key, email, name, picture, is_new
-    )
-    return RedirectResponse(f"{_BASE_URL}/?reveal_token={reveal_token}&is_new={'true' if is_new else 'false'}")
-
-
-@app.get("/auth/reveal")
-async def auth_reveal(token: str, db: AsyncSession = Depends(get_db)):
-    """One-time endpoint — returns API key and deletes the pending reveal record."""
-    row = await crud.consume_pending_reveal(db, token)
-    if not row:
-        raise HTTPException(410, "Reveal token expired or already used. Please sign in again.")
-    return {
-        "api_key":     row.api_key_raw,
-        "user_email":  row.user_email,
-        "user_name":   row.user_name,
-        "user_picture": row.user_picture,
-        "is_new_user": row.is_new_user,
-    }
+    return {"api_key": raw_key, "name": name, "email": email}
 
 
 @app.get("/health")
