@@ -205,6 +205,11 @@ async def run_reconcile_batch(
         correct = sum(1 for r in results if r.decision.value == "matched")
         accuracy = round(correct / len(results), 4) if results else 0.0
 
+    uncertain_count = sum(1 for r in results if r.decision == MatchDecision.UNCERTAIN)
+    all_uncertain = len(results) > 0 and uncertain_count == len(results)
+    if all_uncertain:
+        print(f"  [WARNING] All {len(results)} results are UNCERTAIN — likely API failure", flush=True)
+
     print(f"  Score: {correct}/{len(results)} = {accuracy:.1%}", flush=True)
 
     return ReconcileReport(
@@ -213,4 +218,5 @@ async def run_reconcile_batch(
         total=len(results),
         correct=correct,
         rule_version=rules.version if rules else get_current_version(),
+        all_uncertain=all_uncertain,
     )

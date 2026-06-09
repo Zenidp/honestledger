@@ -45,11 +45,14 @@ def _build_iteration_history(history: list[dict]) -> str:
         delta_holdout = h.get("delta_holdout")
         verdict = h.get("verdict", "unknown")
         action = h.get("action", "unknown")
+        changes = h.get("changes", [])
         delta_str = ""
         if delta_train is not None and delta_holdout is not None:
             delta_str = f"train {delta_train:+.1%} | holdout {delta_holdout:+.1%}"
+        changes_str = ", ".join(changes) if changes else "no parameter changes recorded"
         lines.append(
             f"  Iteration #{num} [{version}]: {desc}\n"
+            f"    Parameters changed: {changes_str}\n"
             f"    Effect: {delta_str}   Verdict: {verdict}   Action: {action}"
         )
     return "\n".join(lines)

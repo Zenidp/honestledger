@@ -48,6 +48,7 @@ class ReconcileReport(BaseModel):
     total: int
     correct: int
     rule_version: str = "v1"
+    all_uncertain: bool = False
 
 
 class RuleProposal(BaseModel):

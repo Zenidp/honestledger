@@ -106,11 +106,15 @@ async def run_verify(
             run_reconcile_batch(holdout_payments,  split="holdout",  rules=proposed_rules,  **_rk),
             run_reconcile_batch(frontier_payments, split="frontier", rules=proposed_rules,  **_rk),
         )
-        # Frontier baseline: run baseline rules on frontier (not cached)
-        baseline_frontier_r = await run_reconcile_batch(frontier_payments, split="frontier", rules=baseline_rules, **_rk)
-        baseline_frontier = baseline_frontier_r.accuracy
-    else:
-        print(f"\n[verify] No cache — all 6 batches in parallel...")
+        # If all holdout results are UNCERTAIN (Gemini API failure), fall back to fresh 6-batch run
+        # so the baseline and candidate are compared under identical conditions.
+        if new_holdout_r.all_uncertain and len(holdout_payments) > 0:
+            print(f"\n[verify] Holdout all-UNCERTAIN detected — Gemini API issue suspected. "
+                  f"Falling back to fresh 6-batch run for fair comparison...")
+            have_cache = False  # triggers the else branch below
+
+    if not have_cache:
+        print(f"\n[verify] No cache / fallback — all 6 batches in parallel...")
         (
             baseline_train_r, baseline_holdout_r, baseline_frontier_r,
             new_train_r, new_holdout_r, new_frontier_r,
@@ -125,6 +129,10 @@ async def run_verify(
         baseline_train = baseline_train_r.accuracy
         baseline_holdout = baseline_holdout_r.accuracy
         baseline_frontier = baseline_frontier_r.accuracy
+    else:
+        # Frontier baseline: run baseline rules on frontier (not cached)
+        baseline_frontier_r = await run_reconcile_batch(frontier_payments, split="frontier", rules=baseline_rules, **_rk)
+        baseline_frontier = baseline_frontier_r.accuracy
 
     new_train, new_holdout, new_frontier = new_train_r.accuracy, new_holdout_r.accuracy, new_frontier_r.accuracy
 
@@ -135,6 +143,37 @@ async def run_verify(
     train_holdout_gap = abs(delta_train - delta_holdout)
     # Frontier passed if it also improves (or at minimum does not regress significantly)
     frontier_passed = delta_frontier >= 0 and delta_frontier > -HACKING_HOLDOUT_DROP
+
+    # Anomaly guard: if candidate holdout is exactly 0.0% when baseline > 10% and we have
+    # holdout payments, it almost certainly means all Gemini calls returned UNCERTAIN (API failure).
+    # Treat as INCONCLUSIVE rather than REWARD_HACKING to avoid poisoning iteration history.
+    if (new_holdout == 0.0 and baseline_holdout > 0.10 and len(holdout_payments) > 0
+            and new_holdout_r.all_uncertain):
+        next_failures = consecutive_failures + 1
+        print(f"\n[verify] ANOMALY: Holdout 0.0% with all-UNCERTAIN results — API failure suspected. "
+              f"Returning INCONCLUSIVE to avoid false REWARD_HACKING.")
+        return VerifyReport(
+            rule_version=proposed_rules.version,
+            score_train=round(new_train, 4),
+            score_holdout=round(new_holdout, 4),
+            score_baseline_train=round(baseline_train, 4),
+            score_baseline_holdout=round(baseline_holdout, 4),
+            delta_train=round(delta_train, 4),
+            delta_holdout=round(delta_holdout, 4),
+            verdict=VerifyVerdict.INCONCLUSIVE,
+            explanation=(
+                f"Verification skipped: all holdout Gemini calls returned UNCERTAIN "
+                f"(likely API quota or transient failure). "
+                f"Baseline holdout was {baseline_holdout:.1%}; candidate result 0.0% is not trustworthy. "
+                f"Please retry verification."
+            ),
+            tier=2,
+            consecutive_failures=next_failures,
+            score_frontier=round(new_frontier, 4),
+            score_baseline_frontier=round(baseline_frontier, 4),
+            delta_frontier=round(delta_frontier, 4),
+            frontier_passed=frontier_passed,
+        )
 
     # Small dataset mode: holdout too small for ±2% granularity (e.g. 7 items → 14% steps)
     # Accept proposal when train improves ≥5%, holdout doesn't regress, and frontier passes.

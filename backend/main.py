@@ -146,6 +146,7 @@ async def _record_iteration(db: AsyncSession, tenant_id: str, verify_report: Ver
         "verdict": vr.verdict.value,
         "action": action,
         "description": proposal.description if proposal else None,
+        "changes": proposal.changes if proposal else [],
         "tier": vr.tier,
         "consecutive_failures": vr.consecutive_failures,
         "cluster_tag": proposal.cluster_tag if proposal else None,
