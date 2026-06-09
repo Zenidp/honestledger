@@ -61,15 +61,21 @@ The error analysis labels each unmatched payment with a tag. Follow these rules 
   Forcing a structural gap via looser rules causes reward hacking on unseen data.
 
 STOPPING CONDITION — output proposed_rule_changes: [] (empty) when:
-- There are zero [THRESHOLD-BLOCKED] items, OR
-- All unmatched are STRUCTURAL-GAP or STRUCTURAL-GAP-LIKELY.
+- There are zero [THRESHOLD-BLOCKED] items AND no other fixable patterns, OR
+- All unmatched are confirmed STRUCTURAL-GAP (similarity < 0.50) — not STRUCTURAL-GAP-LIKELY.
+- Do NOT stop if there are [THRESHOLD-BLOCKED] items that could be addressed by a
+  multi-parameter compound proposal that hasn't been tried yet.
 
 ITERATION HISTORY — if provided, use it to avoid repeating failed approaches:
 - If a parameter was already changed in a previous iteration and the same payments remained
   unmatched afterward, those payments are structural gaps — NOT fixable by further threshold changes.
-- Do NOT propose the same parameter value that was already used in a previous approved iteration.
-- If a previous iteration's verdict was REWARD_HACKING, avoid any changes in the same direction.
-- If delta_holdout was ≤ 0 for a particular approach, do not retry a similar change.
+- Do NOT propose the exact same single-parameter change that was already used in a previous iteration.
+- If a previous iteration's verdict was REWARD_HACKING from a SINGLE-parameter change, you MAY
+  try a MULTI-PARAMETER compound proposal (e.g., name_similarity_threshold + amount_tolerance +
+  date_tolerance together). A compound change can succeed where single-parameter failed because it
+  addresses multiple root causes simultaneously and is more robust on holdout data.
+  Do NOT propose the same single-parameter change in isolation again.
+- If delta_holdout was <= 0 for a particular approach, do not retry a similar change.
 
 Respond ONLY with valid JSON:
 {
