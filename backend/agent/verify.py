@@ -141,16 +141,41 @@ async def run_verify(
     delta_frontier = new_frontier - baseline_frontier
 
     train_holdout_gap = abs(delta_train - delta_holdout)
-    # Frontier passed if it also improves (or at minimum does not regress significantly)
-    frontier_passed = delta_frontier >= 0 and delta_frontier > -HACKING_HOLDOUT_DROP
+    # For small holdout, 1 payment = 1/N change. Require at least a 2-payment drop
+    # before declaring REWARD_HACKING, so a single Gemini flip doesn't poison history.
+    n_holdout = len(holdout_payments)
+    effective_hacking_drop = HACKING_HOLDOUT_DROP
+    if n_holdout > 0 and n_holdout < SMALL_HOLDOUT_THRESHOLD:
+        min_meaningful_drop = 2.0 / n_holdout  # 2 payments worth of drop
+        effective_hacking_drop = max(HACKING_HOLDOUT_DROP, min_meaningful_drop)
 
-    # Anomaly guard: if candidate holdout is exactly 0.0% when baseline > 10% and we have
-    # holdout payments, it almost certainly means all Gemini calls returned UNCERTAIN (API failure).
-    # Treat as INCONCLUSIVE rather than REWARD_HACKING to avoid poisoning iteration history.
+    # Frontier passed if it also improves (or at minimum does not regress significantly)
+    frontier_passed = delta_frontier >= 0 and delta_frontier > -effective_hacking_drop
+
+    # Anomaly guard: if candidate holdout is 0.0% (or very low) when baseline > 10%,
+    # it almost certainly means Gemini returned mostly UNCERTAIN/failed results (API issue).
+    # Three triggers:
+    #   1. ALL results uncertain
+    #   2. >50% results uncertain (partial API failure)
+    #   3. Small holdout (< threshold) AND baseline ≥ 30% AND new = 0.0%
+    #      → getting 0/N matched while baseline had N*30%+ correct is essentially impossible
+    #        without API failure; a good proposal can't cause a 100% collapse
+    high_uncertain_rate = (
+        sum(1 for r in new_holdout_r.results if r.decision.value == "uncertain") / max(len(new_holdout_r.results), 1)
+        > 0.50
+    ) if new_holdout_r.results else False
+    implausible_collapse = (
+        new_holdout == 0.0
+        and baseline_holdout >= 0.30
+        and n_holdout > 0 and n_holdout < SMALL_HOLDOUT_THRESHOLD
+    )
     if (new_holdout == 0.0 and baseline_holdout > 0.10 and len(holdout_payments) > 0
-            and new_holdout_r.all_uncertain):
+            and (new_holdout_r.all_uncertain or high_uncertain_rate or implausible_collapse)):
+        trigger = ("all-UNCERTAIN" if new_holdout_r.all_uncertain
+                   else f"high uncertain rate ({sum(1 for r in new_holdout_r.results if r.decision.value == 'uncertain')}/{len(new_holdout_r.results)})" if high_uncertain_rate
+                   else f"implausible collapse (0.0% on {n_holdout} holdout vs baseline {baseline_holdout:.1%})")
         next_failures = consecutive_failures + 1
-        print(f"\n[verify] ANOMALY: Holdout 0.0% with all-UNCERTAIN results — API failure suspected. "
+        print(f"\n[verify] ANOMALY ({trigger}) — API failure suspected. "
               f"Returning INCONCLUSIVE to avoid false REWARD_HACKING.")
         return VerifyReport(
             rule_version=proposed_rules.version,
@@ -191,7 +216,7 @@ async def run_verify(
         print(f"\n[verify] Small dataset override → GENUINE_IMPROVEMENT (Tier 2)")
     elif delta_holdout >= GENUINE_HOLDOUT_DELTA:
         # Hybrid holdout: frontier must also not regress significantly
-        if delta_frontier <= -HACKING_HOLDOUT_DROP:
+        if delta_frontier <= -effective_hacking_drop:
             tier = 3
             verdict = VerifyVerdict.REWARD_HACKING
             pattern = (
@@ -217,7 +242,7 @@ async def run_verify(
                 f"Frontier holdout: {delta_frontier:+.1%} ({baseline_frontier:.1%} → {new_frontier:.1%}). "
                 f"Rule changes generalize to unseen data. {tier_note}"
             )
-    elif delta_holdout <= -HACKING_HOLDOUT_DROP:
+    elif delta_holdout <= -effective_hacking_drop:
         tier = 3
         verdict = VerifyVerdict.REWARD_HACKING
         if delta_train > 0:
