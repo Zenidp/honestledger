@@ -12,6 +12,7 @@ import { ActionBar } from './components/ActionBar'
 import { PipelineSteps, derivePipelineSteps } from './components/PipelineSteps'
 import { NextStepsPanel } from './components/NextStepsPanel'
 import LandingPage from './components/LandingPage'
+import ApiKeyReveal from './components/ApiKeyReveal'
 import UploadPanel from './components/UploadPanel'
 
 import * as api from './api'
@@ -37,7 +38,14 @@ const JUDGE_STEPS = [
 ]
 
 export default function App() {
-  const [authenticated, setAuthenticated] = useState(api.hasApiKey())
+  // Check for OAuth redirect params in URL
+  const _urlParams = new URLSearchParams(window.location.search)
+  const _revealToken = _urlParams.get('reveal_token')
+  const _authError   = _urlParams.get('auth_error')
+
+  const [revealToken] = useState<string | null>(_revealToken)
+  const [authError]   = useState<string | null>(_authError)
+  const [authenticated, setAuthenticated] = useState(api.hasApiKey() && !_revealToken)
   const [status, setStatus] = useState<AppStatus | null>(null)
   const [reconcile, setReconcile] = useState<ReconcileReport | null>(null)
   const [proposal, setProposal] = useState<RuleProposal | null>(null)
@@ -331,9 +339,19 @@ export default function App() {
     setVerifyReport(null); setHistory([])
   }
 
+  // ── OAuth reveal screen — intercept before anything else ────────────────────
+  if (revealToken) {
+    return (
+      <ApiKeyReveal
+        revealToken={revealToken}
+        onDone={() => setAuthenticated(true)}
+      />
+    )
+  }
+
   // ── Auth gate ────────────────────────────────────────────────────────────────
   if (!authenticated) {
-    return <LandingPage onLogin={() => setAuthenticated(true)} />
+    return <LandingPage onLogin={() => setAuthenticated(true)} authError={authError} />
   }
 
   return (

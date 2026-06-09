@@ -2,11 +2,13 @@
 
 import hashlib
 import secrets
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import select, delete, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.db.models import (
     Tenant, ApiKey, TenantUpload, RuleVersion, TenantSchemaMapping,
     ReconcileResult, RuleProposal, VerifyReport, IterationRecord, Job,
+    OAuthUser, PendingReveal,
 )
 
 
@@ -68,6 +70,68 @@ async def resolve_api_key(db: AsyncSession, raw_key: str) -> Tenant | None:
 async def list_api_keys(db: AsyncSession, tenant_id: str) -> list[ApiKey]:
     result = await db.execute(select(ApiKey).where(ApiKey.tenant_id == tenant_id))
     return list(result.scalars().all())
+
+
+async def revoke_all_tenant_keys(db: AsyncSession, tenant_id: str) -> None:
+    await db.execute(update(ApiKey).where(ApiKey.tenant_id == tenant_id).values(is_active=False))
+    await db.commit()
+
+
+# ── OAuth Users ───────────────────────────────────────────────────────────────
+
+async def get_oauth_user(db: AsyncSession, google_id: str) -> OAuthUser | None:
+    result = await db.execute(select(OAuthUser).where(OAuthUser.google_id == google_id))
+    return result.scalar_one_or_none()
+
+
+async def create_oauth_user(db: AsyncSession, google_id: str, email: str,
+                             name: str | None, picture: str | None, tenant_id: str) -> OAuthUser:
+    user = OAuthUser(google_id=google_id, email=email, name=name, picture=picture, tenant_id=tenant_id)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+# ── Pending Reveal ─────────────────────────────────────────────────────────────
+
+async def create_pending_reveal(db: AsyncSession, tenant_id: str, api_key_raw: str,
+                                 email: str | None, name: str | None, picture: str | None,
+                                 is_new_user: bool) -> str:
+    """Create a 10-minute one-time reveal record. Returns the raw token."""
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    row = PendingReveal(
+        token_hash=token_hash, tenant_id=tenant_id, api_key_raw=api_key_raw,
+        user_email=email, user_name=name, user_picture=picture,
+        is_new_user=is_new_user, expires_at=expires_at,
+    )
+    db.add(row)
+    await db.commit()
+    return raw_token
+
+
+async def consume_pending_reveal(db: AsyncSession, raw_token: str) -> PendingReveal | None:
+    """Look up and delete a reveal record. Returns None if expired or not found."""
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    result = await db.execute(select(PendingReveal).where(PendingReveal.token_hash == token_hash))
+    row = result.scalar_one_or_none()
+    if not row:
+        return None
+    if row.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        await db.delete(row)
+        await db.commit()
+        return None
+    # Copy data before delete
+    snapshot = PendingReveal(
+        token_hash=row.token_hash, tenant_id=row.tenant_id, api_key_raw=row.api_key_raw,
+        user_email=row.user_email, user_name=row.user_name, user_picture=row.user_picture,
+        is_new_user=row.is_new_user, expires_at=row.expires_at,
+    )
+    await db.delete(row)
+    await db.commit()
+    return snapshot
 
 
 # ── Uploads ───────────────────────────────────────────────────────────────────
