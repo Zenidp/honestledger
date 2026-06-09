@@ -40,9 +40,9 @@ export function ApprovalControls({ verifyReport, onApprove, onReject, loading }:
 
           <div className="flex gap-3">
             <motion.button
-              whileHover={canApprove ? { scale: 1.02 } : {}}
-              whileTap={canApprove ? { scale: 0.98 } : {}}
-              onClick={canApprove ? onApprove : undefined}
+              whileHover={canApprove && !loading ? { scale: 1.02 } : {}}
+              whileTap={canApprove && !loading ? { scale: 0.98 } : {}}
+              onClick={canApprove && !loading ? onApprove : undefined}
               disabled={!canApprove || loading}
               className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg text-sm font-medium transition-all ${
                 canApprove && !loading
@@ -50,16 +50,22 @@ export function ApprovalControls({ verifyReport, onApprove, onReject, loading }:
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed'
               }`}
             >
-              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-              Approve & Activate
+              {loading
+                ? <><Loader2 className="w-4 h-4 animate-spin" /> Processing…</>
+                : <><CheckCircle2 className="w-4 h-4" /> Approve & Activate</>
+              }
             </motion.button>
 
             <motion.button
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-              onClick={onReject}
+              whileHover={!loading ? { scale: 1.02 } : {}}
+              whileTap={!loading ? { scale: 0.98 } : {}}
+              onClick={!loading ? onReject : undefined}
               disabled={loading}
-              className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 transition-all"
+              className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg text-sm font-medium border transition-all ${
+                loading
+                  ? 'border-gray-100 text-gray-300 cursor-not-allowed'
+                  : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+              }`}
             >
               <XCircle className="w-4 h-4" />
               Reject

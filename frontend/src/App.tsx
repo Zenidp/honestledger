@@ -565,7 +565,7 @@ export default function App() {
                 verifyReport={verifyReport}
                 onApprove={handleApprove}
                 onReject={handleReject}
-                loading={loading === 'approve' || loading === 'reject'}
+                loading={pipelineRunning || loading === 'approve' || loading === 'reject'}
               />
             )}
           </div>
