@@ -391,6 +391,46 @@ def _detect_field(row: dict, *candidates) -> str:
     return ""
 
 
+_PAYMENT_FIELDS = [
+    ("id",         ["id","no_transaksi","payment_id","transaction_id","trx_id","ref_id"],                                          True),
+    ("payer_name", ["payer_name","nama_pengirim","payer","from_name","sender","customer","pembayar"],                               True),
+    ("amount",     ["amount","nominal","total","jumlah","value","debit","jumlah_bayar"],                                            True),
+    ("date",       ["date","tanggal","payment_date","transaction_date","tgl","trans_date"],                                         False),
+    ("reference",  ["reference","keterangan","description","ref","memo","note","remarks","ket"],                                    False),
+]
+_INVOICE_FIELDS = [
+    ("id",             ["id","no_invoice","invoice_id","invoice_number","inv_id","inv_no"],                                         True),
+    ("vendor_name",    ["vendor_name","nama_vendor","vendor","supplier","company_name","supplier_name","nama_perusahaan"],           True),
+    ("amount",         ["amount","total_tagihan","total","nominal","jumlah_tagihan","invoice_amount","jumlah"],                      True),
+    ("date",           ["date","tanggal_invoice","invoice_date","tgl_invoice","tgl"],                                               False),
+    ("invoice_number", ["invoice_number","no_invoice","inv_no","inv_number","invoice_no"],                                          False),
+]
+
+
+def _check_detected_columns(rows: list[dict], file_type: str, filename: str) -> list[dict]:
+    """Return warnings for important fields not detected in the uploaded CSV."""
+    if not rows:
+        return []
+    cols = {k.lower().strip() for k in rows[0].keys()}
+    fields = _PAYMENT_FIELDS if file_type == "payments" else _INVOICE_FIELDS
+    warnings = []
+    for field_name, aliases, critical in fields:
+        if not any(a in cols for a in aliases):
+            warnings.append({
+                "file": filename,
+                "file_type": file_type,
+                "missing_field": field_name,
+                "critical": critical,
+                "suggested_names": aliases[:5],
+                "message": (
+                    f"[{'REQUIRED' if critical else 'OPTIONAL'}] "
+                    f"Column '{field_name}' not detected in {filename}. "
+                    f"Rename one of your columns to: {', '.join(aliases[:4])}"
+                ),
+            })
+    return warnings
+
+
 def _uploaded_to_payments(rows: list[dict]):
     """Convert raw uploaded dict rows to Payment objects with flexible column detection."""
     from backend.models.schemas import Payment
@@ -817,6 +857,11 @@ async def upload_data(
             new_map = {c: c.lower().replace(" ", "_") for c in cols}
             await crud.save_schema_mapping(db, tenant.id, file_type, new_map, fingerprint)
 
+    # Column detection warnings (missing/unrecognised fields)
+    column_warnings: list[dict] = []
+    column_warnings += _check_detected_columns(payments, "payments", payments_file.filename or "payments.csv")
+    column_warnings += _check_detected_columns(invoices, "invoices", invoices_file.filename or "invoices.csv")
+
     # Parse optional ground truth / reconciliation report
     gt: dict = {}
     gt_rows_count = 0
@@ -836,8 +881,12 @@ async def upload_data(
         "invoices": len(invoices),
         "ground_truth_entries": gt_rows_count,
         "schema_warnings": schema_warnings,
-        "note": "Ground truth not provided — accuracy scoring uses built-in dataset."
-        if not schema_warnings else "Upload successful. Review schema warnings before reconciling.",
+        "column_warnings": column_warnings,
+        "note": (
+            "Upload successful."
+            if not schema_warnings and not column_warnings
+            else "Upload successful with warnings — review column mapping before reconciling."
+        ),
     }
 
 

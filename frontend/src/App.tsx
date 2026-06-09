@@ -11,7 +11,7 @@ import { AccuracyChart } from './components/AccuracyChart'
 import { ActionBar } from './components/ActionBar'
 import { PipelineSteps, derivePipelineSteps } from './components/PipelineSteps'
 import { NextStepsPanel } from './components/NextStepsPanel'
-import ApiKeyGate from './components/ApiKeyGate'
+import LandingPage from './components/LandingPage'
 import UploadPanel from './components/UploadPanel'
 
 import * as api from './api'
@@ -333,7 +333,7 @@ export default function App() {
 
   // ── Auth gate ────────────────────────────────────────────────────────────────
   if (!authenticated) {
-    return <ApiKeyGate onAuthenticated={() => setAuthenticated(true)} />
+    return <LandingPage onLogin={() => setAuthenticated(true)} />
   }
 
   return (
