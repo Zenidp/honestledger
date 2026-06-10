@@ -265,7 +265,10 @@ async def run_judge(results, current_rules, next_version: str = "v2",
     print("  [Judge] Calling Gemini judge...")
     client = get_gemini_client()
 
-    for attempt in range(3):
+    # Brief initial delay — reconcile just ran many API calls; let quota recover
+    await asyncio.sleep(3)
+
+    for attempt in range(4):
         try:
             response = await client.aio.models.generate_content(
                 model=GEMINI_MODEL,
@@ -273,15 +276,16 @@ async def run_judge(results, current_rules, next_version: str = "v2",
                 config=types.GenerateContentConfig(
                     system_instruction=JUDGE_SYSTEM,
                     temperature=0.1,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
                 ),
             )
             proposal = _parse_judge_response(response.text, next_version)
             print(f"  [Judge] Proposal generated: {proposal.description[:80]}")
             return proposal
         except ClientError as e:
-            if "429" in str(e) and attempt < 2:
-                wait = 30 * (2 ** attempt)  # 30s, 60s
-                print(f"  [Judge] Rate limit, waiting {wait}s (attempt {attempt+1}/3)...")
+            if "429" in str(e) and attempt < 3:
+                wait = 30 * (2 ** attempt)  # 30s, 60s, 120s
+                print(f"  [Judge] Rate limit, waiting {wait}s (attempt {attempt+1}/4)...")
                 await asyncio.sleep(wait)
             else:
                 raise
