@@ -79,4 +79,5 @@ export interface AppStatus {
   has_proposal: boolean
   has_verify_report: boolean
   iteration_count: number
+  has_upload: boolean
 }

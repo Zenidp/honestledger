@@ -11,6 +11,7 @@ interface Props {
   hasProposal: boolean
   isOptimal: boolean
   verifyVerdict?: string | null
+  hasUpload: boolean
   onReconcile: () => void
   onJudge: () => void
   onVerify: () => void
@@ -30,6 +31,7 @@ interface PrimaryCTA {
   onClick: () => void
   variant: 'teal' | 'amber' | 'indigo' | 'green' | 'red'
   loadingKey?: string
+  disabled?: boolean
 }
 
 function PrimaryButton({ cta, isLoading }: { cta: PrimaryCTA; isLoading: boolean }) {
@@ -40,13 +42,14 @@ function PrimaryButton({ cta, isLoading }: { cta: PrimaryCTA; isLoading: boolean
     green:  'bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-100',
     red:    'bg-red-500 hover:bg-red-600 text-white shadow-red-100',
   }
+  const isDisabled = isLoading || cta.disabled
   return (
     <motion.button
-      whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
+      whileHover={{ scale: isDisabled ? 1 : 1.02 }} whileTap={{ scale: isDisabled ? 1 : 0.97 }}
       onClick={cta.onClick}
-      disabled={isLoading}
+      disabled={isDisabled}
       className={`flex items-center gap-3 px-5 py-2.5 rounded-xl text-sm font-semibold shadow-lg transition-all
-        ${variants[cta.variant]} ${isLoading ? 'opacity-75 cursor-not-allowed' : ''}`}
+        ${variants[cta.variant]} ${isDisabled ? 'opacity-40 cursor-not-allowed' : ''}`}
     >
       <span className="flex items-center gap-2">
         {isLoading
@@ -104,6 +107,7 @@ function OptimalBadge() {
 
 export function ActionBar({
   status, hasReconcile, hasProposal, isOptimal, verifyVerdict,
+  hasUpload,
   onReconcile, onJudge, onVerify, onVerifyGreedy, onApprove, onReject,
   onSeedDemo, onReset,
   loading, pipelineRunning,
@@ -116,9 +120,11 @@ export function ActionBar({
 
   if (!hasReconcile) {
     primaryCTA = {
-      label: 'Run Reconcile', sublabel: 'Start the AI pipeline',
+      label: 'Run Reconcile',
+      sublabel: hasUpload ? 'Start the AI pipeline' : 'Upload data first to begin',
       icon: <Play className="w-4 h-4" />, onClick: onReconcile,
       variant: 'teal', loadingKey: 'reconcile',
+      disabled: !hasUpload,
     }
   } else if (!hasProposal && !isOptimal) {
     primaryCTA = {

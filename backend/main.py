@@ -720,6 +720,7 @@ async def status(
     proposal = await crud.get_latest_proposal(db, tenant.id)
     verify = await crud.get_latest_verify_report(db, tenant.id)
     iterations = await crud.get_iterations(db, tenant.id)
+    upload = await crud.get_latest_upload(db, tenant.id)
     return {
         "tenant_id": tenant.id,
         "tenant_name": tenant.name,
@@ -728,6 +729,7 @@ async def status(
         "has_proposal": proposal is not None,
         "has_verify_report": verify is not None,
         "iteration_count": len(iterations),
+        "has_upload": upload is not None,
     }
 
 

@@ -326,6 +326,7 @@ export default function App() {
     if (prop) setProposal(prop)
     if (ver) { setVerifyReport(ver); if (ver.verdict === 'REWARD_HACKING') setShowBanner(true) }
     setHistory(hist.iterations)
+    await refreshStatus()
   })
 
   const handleReset = () => withLoading('reset', async () => {
@@ -512,6 +513,7 @@ export default function App() {
           hasProposal={proposal !== null && (!proposal.changes || proposal.changes.length === 0) === false}
           isOptimal={proposal !== null && (!proposal.changes || proposal.changes.length === 0)}
           verifyVerdict={verifyReport?.verdict}
+          hasUpload={status?.has_upload ?? false}
           onReconcile={handleReconcile}
           onJudge={() => handleJudge(false)}
           onVerify={() => handleVerify()}
