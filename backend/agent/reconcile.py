@@ -11,7 +11,7 @@ from backend.agent.rules import get_current_rules, get_current_version
 from backend.data.loader import load_invoices, score_results
 
 _AGGRESSIVE_THRESHOLD = 0.05
-_RECONCILE_SEM = asyncio.Semaphore(2)  # max 2 concurrent — conservative to avoid ToS suspension
+_RECONCILE_SEM = asyncio.Semaphore(1)  # max 1 concurrent — strict serial to respect low Vertex AI quota
 
 _AGGRESSIVE_MODE_INSTRUCTION = """
 
@@ -148,7 +148,7 @@ async def _reconcile_one(idx: int, total: int, payment, invoices, rules: RuleSet
                 status = "✓" if result.decision != MatchDecision.UNCERTAIN else "?"
                 print(f"    [{idx:02d}/{total}] {payment.id} → {result.decision.value} "
                       f"(conf={result.confidence:.2f}) {status}", flush=True)
-                await asyncio.sleep(1.0)  # rate limit: 1s delay between calls
+                await asyncio.sleep(2.0)  # rate limit: 2s delay — strict serial for low-quota accounts
                 return result
             except ClientError as e:
                 is_429 = "429" in str(e)
