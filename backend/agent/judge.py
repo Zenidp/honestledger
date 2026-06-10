@@ -280,8 +280,8 @@ async def run_judge(results, current_rules, next_version: str = "v2",
             return proposal
         except ClientError as e:
             if "429" in str(e) and attempt < 2:
-                wait = 15 * (2 ** attempt)
-                print(f"  [Judge] Rate limit, waiting {wait}s...")
+                wait = 30 * (2 ** attempt)  # 30s, 60s
+                print(f"  [Judge] Rate limit, waiting {wait}s (attempt {attempt+1}/3)...")
                 await asyncio.sleep(wait)
             else:
                 raise

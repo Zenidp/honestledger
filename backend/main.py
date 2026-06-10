@@ -1159,9 +1159,14 @@ async def judge(
         for r in reconcile_row.results
     ]
 
-    proposal = await run_judge(results, rules, next_version=req.next_version,
-                               invoices=invoices, payments_by_id=payments_by_id,
-                               iteration_history=iteration_history)
+    try:
+        proposal = await run_judge(results, rules, next_version=req.next_version,
+                                   invoices=invoices, payments_by_id=payments_by_id,
+                                   iteration_history=iteration_history)
+    except Exception as e:
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            raise HTTPException(503, "Gemini API rate limit reached. Please wait 60 seconds and try again.")
+        raise
     proposal_dict = _proposal_to_dict(proposal)
 
     # Use a fresh session — the original `db` connection may have timed out
