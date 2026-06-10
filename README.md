@@ -11,6 +11,8 @@
 [![React](https://img.shields.io/badge/React-18-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue?style=for-the-badge)](LICENSE)
 
+<img src="docs/honestLadger_bg.jpg" alt="HonestLedger Banner" width="100%">
+
 ---
 
 > **Financial reconciliation** traditionally takes days and is prone to human error.
