@@ -1016,7 +1016,7 @@ async def get_latest_reconcile(
     row = await crud.get_latest_reconcile(db, tenant.id)
     if not row:
         raise HTTPException(404, "No reconcile results yet.")
-    return {**row.results, "accuracy": row.accuracy, "total": row.total,
+    return {"results": row.results, "accuracy": row.accuracy, "total": row.total,
             "correct": row.correct, "rule_version": row.rule_version}
 
 
