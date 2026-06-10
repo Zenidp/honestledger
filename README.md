@@ -4,7 +4,7 @@
 
 ### *AI-Powered Financial Reconciliation with Anti-Reward-Hacking Verification*
 
-[![Live Demo](https://img.shields.io/badge/🚀_Live_Demo-honestledger-4F46E5?style=for-the-badge)](https://honestledger-816125388987.us-central1.run.app)
+[![Live Demo](https://img.shields.io/badge/🚀_Live_Demo-honestledger-4F46E5?style=for-the-badge)](https://honestledger-254273430235.us-central1.run.app)
 [![Google Cloud](https://img.shields.io/badge/Google_Cloud-Vertex_AI-4285F4?style=for-the-badge&logo=googlecloud&logoColor=white)](https://cloud.google.com/vertex-ai)
 [![Arize Phoenix](https://img.shields.io/badge/Arize-Phoenix_Observability-FF6B35?style=for-the-badge)](https://phoenix.arize.com)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
@@ -1049,7 +1049,7 @@ This project is licensed under the **Apache License 2.0** — see the [LICENSE](
 
 Built with ❤️ for **Google Cloud Hackathon 2026**
 
-[![Live Demo](https://img.shields.io/badge/🚀_Try_It_Now-honestledger-4F46E5?style=for-the-badge)](https://honestledger-816125388987.us-central1.run.app)
+[![Live Demo](https://img.shields.io/badge/🚀_Try_It_Now-honestledger-4F46E5?style=for-the-badge)](https://honestledger-254273430235.us-central1.run.app)
 
 *"It's not about how high the accuracy is — it's about how honest the AI is."*
 
