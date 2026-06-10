@@ -16,7 +16,7 @@
 ---
 
 > **Financial reconciliation** traditionally takes days and is prone to human error.
-> HonestLedger automates this process with AI, then **verifies the honesty of AI itself** —
+> HonestLedger automates this process with AI, then **verifies the honesty of AI itself**,
 > preventing accuracy manipulation that looks good on paper but fails in the real world.
 
 ---
@@ -321,6 +321,26 @@ At least 3 transaction flips are required before declaring reward hacking
 | **Google Vertex AI** | Gemini 2.5 Flash hosting & inference |
 | **Supabase (PostgreSQL)** | Multi-tenant database |
 | **Arize Phoenix Cloud** | LLM observability & tracing |
+
+---
+
+## 🗄️ Database Schema (Supabase PostgreSQL)
+
+HonestLedger uses a multi-tenant PostgreSQL schema where every table is scoped by `tenant_id`:
+
+| Table | Purpose |
+|---|---|
+| `tenants` | Per-company isolation — stores API key (hashed), current active rule version |
+| `rule_versions` | Rule snapshots per tenant (`v0 → v1 → v2 ...`) — enables rollback to any prior version |
+| `iterations` | Judge iteration history per tenant — prevents the AI from re-proposing parameters already proven to fail |
+| `reconcile_results` | Per-transaction match results, confidence scores, and rationale text |
+| `holdout_cache` | Cached holdout evaluation scores — used by Verify layer for reward hacking detection |
+| `user_registrations` | Self-signup email → tenant mapping for onboarding |
+
+**Key design decisions:**
+- `rule_versions` stores the full rule set as JSON — no schema migration needed when rules evolve
+- `iterations` includes the exact parameter changes proposed, not just descriptions — prevents the judge from making the same proposal with different wording
+- `holdout_cache` is invalidated when new data is uploaded — ensures verification always reflects current dataset
 
 ---
 
