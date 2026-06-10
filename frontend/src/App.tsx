@@ -55,6 +55,7 @@ export default function App() {
   const [pipelineRunning, setPipelineRunning] = useState(false)
 
   const logTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const cancelPipelineRef = useRef(false)
 
   const startSimulatedLog = (steps: string[], intervalMs = 2200) => {
     if (logTimerRef.current !== null) {
@@ -155,6 +156,7 @@ export default function App() {
 
   // Re-run reconcile using data already in DB (no upload needed) then continue loop
   const handleReconcileLoop = async () => {
+    if (cancelPipelineRef.current) return
     const stop = startSimulatedLog(RECONCILE_STEPS)
     setLoading('reconcile'); setError(null)
     let report: ReconcileReport | null = null
@@ -206,7 +208,7 @@ export default function App() {
       return
     }
 
-    if (autoChain) await handleVerify(versionNum, iteration)
+    if (autoChain && !cancelPipelineRef.current) await handleVerify(versionNum, iteration)
   }
 
   const pollJob = async (job_id: string, onDone: (result: VerifyReport) => void) => {
@@ -253,6 +255,8 @@ export default function App() {
     }
 
     const verdict = result ? (result as VerifyReport).verdict : null
+
+    if (cancelPipelineRef.current) { setPipelineRunning(false); return }
 
     if (verdict === 'INCONCLUSIVE' && iteration + 1 < MAX_AUTO_ITERATIONS) {
       // Keep trying: propose new rules and verify again
@@ -325,9 +329,12 @@ export default function App() {
   })
 
   const handleReset = () => withLoading('reset', async () => {
+    cancelPipelineRef.current = true
+    setPipelineRunning(false)
     await api.resetHistory()
     setReconcile(null); setProposal(null); setVerifyReport(null)
     setHistory([]); setShowBanner(false)
+    cancelPipelineRef.current = false
   })
 
   const handleLogout = () => {
