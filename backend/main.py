@@ -1275,7 +1275,17 @@ async def approve(
     version = req.rule_version or report.rule_version
     rv = await crud.get_rule_version(db, tenant.id, version)
     if not rv:
-        raise HTTPException(404, f"Rule version '{version}' not registered.")
+        # Rule version missing from DB (e.g. judge saved it but DB rolled back).
+        # Recover: re-derive from proposal and re-register before approving.
+        proposal_row_rec = await crud.get_latest_proposal(db, tenant.id)
+        if proposal_row_rec:
+            p_rec = _proposal_from_dict(proposal_row_rec.proposal)
+            base_rules = await _get_current_rules_for_tenant(db, tenant.id)
+            recovered = apply_rule_proposal(p_rec, base_version=base_rules.version)
+            await crud.upsert_rule_version(db, tenant.id, version, _rules_to_dict(recovered))
+            register_rules(recovered)
+        else:
+            raise HTTPException(404, f"Rule version '{version}' not registered and proposal unavailable — re-run judge.")
 
     await crud.set_current_rule_version(db, tenant.id, version)
 

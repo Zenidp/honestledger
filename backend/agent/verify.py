@@ -216,7 +216,7 @@ async def run_verify(
         print(f"\n[verify] Small dataset override → GENUINE_IMPROVEMENT (Tier 2)")
     elif delta_holdout >= GENUINE_HOLDOUT_DELTA:
         # Hybrid holdout: frontier must also not regress significantly
-        if delta_frontier <= -effective_hacking_drop:
+        if delta_frontier < -effective_hacking_drop:
             tier = 3
             verdict = VerifyVerdict.REWARD_HACKING
             pattern = (
@@ -242,7 +242,7 @@ async def run_verify(
                 f"Frontier holdout: {delta_frontier:+.1%} ({baseline_frontier:.1%} → {new_frontier:.1%}). "
                 f"Rule changes generalize to unseen data. {tier_note}"
             )
-    elif delta_holdout <= -effective_hacking_drop:
+    elif delta_holdout < -effective_hacking_drop:
         tier = 3
         verdict = VerifyVerdict.REWARD_HACKING
         if delta_train > 0:
