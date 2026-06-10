@@ -147,7 +147,7 @@ export function ActionBar({
   }
 
   const primaryLoading = primaryCTA ? loading === primaryCTA.loadingKey : false
-  const showPipeline   = blocked && !primaryLoading
+  const showPipeline   = pipelineRunning && !primaryLoading
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl shadow-sm px-4 py-3 space-y-2.5">

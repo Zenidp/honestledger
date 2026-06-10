@@ -101,11 +101,9 @@ async def run_verify(
         baseline_holdout = cached_baseline_holdout
         print(f"\n[verify] Cached baseline — train={baseline_train:.1%} holdout={baseline_holdout:.1%}")
         print(f"[verify] Running proposed only (train+anchor+frontier)...")
-        new_train_r, new_holdout_r, new_frontier_r = await asyncio.gather(
-            run_reconcile_batch(train_payments,    split="train",    rules=proposed_rules,  **_rk),
-            run_reconcile_batch(holdout_payments,  split="holdout",  rules=proposed_rules,  **_rk),
-            run_reconcile_batch(frontier_payments, split="frontier", rules=proposed_rules,  **_rk),
-        )
+        new_train_r    = await run_reconcile_batch(train_payments,    split="train",    rules=proposed_rules,  **_rk)
+        new_holdout_r  = await run_reconcile_batch(holdout_payments,  split="holdout",  rules=proposed_rules,  **_rk)
+        new_frontier_r = await run_reconcile_batch(frontier_payments, split="frontier", rules=proposed_rules,  **_rk)
         # If all holdout results are UNCERTAIN (Gemini API failure), fall back to fresh 6-batch run
         # so the baseline and candidate are compared under identical conditions.
         if new_holdout_r.all_uncertain and len(holdout_payments) > 0:
@@ -114,18 +112,13 @@ async def run_verify(
             have_cache = False  # triggers the else branch below
 
     if not have_cache:
-        print(f"\n[verify] No cache / fallback — all 6 batches in parallel...")
-        (
-            baseline_train_r, baseline_holdout_r, baseline_frontier_r,
-            new_train_r, new_holdout_r, new_frontier_r,
-        ) = await asyncio.gather(
-            run_reconcile_batch(train_payments,    split="train",    rules=baseline_rules,  **_rk),
-            run_reconcile_batch(holdout_payments,  split="holdout",  rules=baseline_rules,  **_rk),
-            run_reconcile_batch(frontier_payments, split="frontier", rules=baseline_rules,  **_rk),
-            run_reconcile_batch(train_payments,    split="train",    rules=proposed_rules,  **_rk),
-            run_reconcile_batch(holdout_payments,  split="holdout",  rules=proposed_rules,  **_rk),
-            run_reconcile_batch(frontier_payments, split="frontier", rules=proposed_rules,  **_rk),
-        )
+        print(f"\n[verify] No cache / fallback — 6 batches sequential (rate-limit safe)...")
+        baseline_train_r    = await run_reconcile_batch(train_payments,    split="train",    rules=baseline_rules,  **_rk)
+        baseline_holdout_r  = await run_reconcile_batch(holdout_payments,  split="holdout",  rules=baseline_rules,  **_rk)
+        baseline_frontier_r = await run_reconcile_batch(frontier_payments, split="frontier", rules=baseline_rules,  **_rk)
+        new_train_r         = await run_reconcile_batch(train_payments,    split="train",    rules=proposed_rules,  **_rk)
+        new_holdout_r       = await run_reconcile_batch(holdout_payments,  split="holdout",  rules=proposed_rules,  **_rk)
+        new_frontier_r      = await run_reconcile_batch(frontier_payments, split="frontier", rules=proposed_rules,  **_rk)
         baseline_train = baseline_train_r.accuracy
         baseline_holdout = baseline_holdout_r.accuracy
         baseline_frontier = baseline_frontier_r.accuracy
