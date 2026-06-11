@@ -265,10 +265,11 @@ async def run_judge(results, current_rules, next_version: str = "v2",
     print("  [Judge] Calling Gemini judge...")
     client = get_gemini_client()
 
-    # Brief initial delay — reconcile just ran many API calls; let quota recover
-    await asyncio.sleep(3)
+    # Reconcile just saturated the per-minute quota; wait before the first call.
+    print("  [Judge] Waiting 30s for Vertex AI quota to recover after reconcile...")
+    await asyncio.sleep(30)
 
-    for attempt in range(4):
+    for attempt in range(3):
         try:
             response = await client.aio.models.generate_content(
                 model=GEMINI_MODEL,
@@ -283,9 +284,9 @@ async def run_judge(results, current_rules, next_version: str = "v2",
             print(f"  [Judge] Proposal generated: {proposal.description[:80]}")
             return proposal
         except ClientError as e:
-            if "429" in str(e) and attempt < 3:
-                wait = 30 * (2 ** attempt)  # 30s, 60s, 120s
-                print(f"  [Judge] Rate limit, waiting {wait}s (attempt {attempt+1}/4)...")
+            if "429" in str(e) and attempt < 2:
+                wait = 60 * (2 ** attempt)  # 60s, 120s
+                print(f"  [Judge] Rate limit, waiting {wait}s (attempt {attempt+1}/3)...")
                 await asyncio.sleep(wait)
             else:
                 raise

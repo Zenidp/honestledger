@@ -1167,7 +1167,7 @@ async def judge(
                                    iteration_history=iteration_history)
     except Exception as e:
         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-            raise HTTPException(503, "Gemini API rate limit reached. Please wait 60 seconds and try again.")
+            raise HTTPException(503, "Gemini API rate limit reached. Please wait 3 minutes and try again.")
         raise
     proposal_dict = _proposal_to_dict(proposal)
 

@@ -31,6 +31,8 @@ const RECONCILE_STEPS = [
 ]
 
 const JUDGE_STEPS = [
+  'Waiting for Vertex AI quota to recover (~30s)...',
+  'Fetching observability traces from Phoenix...',
   'Analyzing reconciliation failure patterns...',
   'Identifying root causes of mismatches...',
   'Generating rule improvement proposal...',
@@ -62,12 +64,12 @@ export default function App() {
       clearInterval(logTimerRef.current)
       logTimerRef.current = null
     }
-    setLogSteps([])
+    // Show the first step immediately so there's no silent gap at the start
+    setLogSteps(steps.slice(0, 1))
     setLogRunning(true)
-    let count = 0
+    let count = 1
     const timerId = setInterval(() => {
       count++
-      // Set exact slice — no append, no race condition
       setLogSteps(steps.slice(0, count))
       if (count >= steps.length) {
         clearInterval(timerId)
@@ -182,7 +184,7 @@ export default function App() {
   }
 
   const handleJudge = async (autoChain = false, versionNum = 2, iteration = 0) => {
-    const stop = startSimulatedLog(JUDGE_STEPS, 2500)
+    const stop = startSimulatedLog(JUDGE_STEPS, 6000)
     setLoading('judge'); setError(null)
     let proposal: RuleProposal | null = null
     try {

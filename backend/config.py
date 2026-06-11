@@ -42,7 +42,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 GOOGLE_CLOUD_PROJECT: str = os.environ["GOOGLE_CLOUD_PROJECT"]
 GOOGLE_CLOUD_LOCATION: str = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-ga")
 
 PHOENIX_API_KEY: str = os.environ["PHOENIX_API_KEY"]
 PHOENIX_COLLECTOR_ENDPOINT: str = os.environ["PHOENIX_COLLECTOR_ENDPOINT"]
