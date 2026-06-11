@@ -289,11 +289,11 @@ export default function App() {
   const handleVerifyGreedy = async () => {
     setLoading('greedy'); setError(null)
     try {
-      const { job_id } = await api.runVerifyGreedy()
-      await pollJob(job_id, result => {
-        setVerifyReport(result)
-        if (result.verdict === 'REWARD_HACKING') setShowBanner(true)
-      })
+      await api.seedHacking()
+      const ver = await api.getLatestVerify().catch(() => null)
+      const prop = await api.getLatestProposal().catch(() => null)
+      if (ver) { setVerifyReport(ver); if (ver.verdict === 'REWARD_HACKING') setShowBanner(true) }
+      if (prop) setProposal(prop)
     } catch (e: any) {
       setError(e?.response?.data?.detail ?? e?.message ?? 'Unknown error')
     } finally { setLoading(null); await refreshStatus() }

@@ -185,7 +185,7 @@ export function ActionBar({
           )}
 
           <SmallButton
-            label="Greedy Attack"
+            label="Reward Hacking Test"
             icon={<AlertTriangle className="w-3 h-3" />}
             onClick={onVerifyGreedy}
             loading={loading === 'greedy'}
