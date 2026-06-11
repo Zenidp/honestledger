@@ -203,7 +203,20 @@ export function ActionBar({
         </div>
       </div>
 
-      {/* Demo row — hidden */}
+      {/* Demo row */}
+      <div className="flex items-center gap-2 pt-1 border-t border-gray-100">
+        <span className="text-[11px] text-gray-400 font-medium shrink-0">Demo:</span>
+        <SmallButton
+          label="⚡ Seed instant demo"
+          icon={<Zap className="w-3 h-3" />}
+          onClick={onSeedDemo}
+          loading={loading === 'seed'}
+          variant="neutral"
+        />
+        <span className="text-[11px] text-gray-300 hidden sm:block">
+          Pre-computed results — no Gemini calls, ideal for live demos
+        </span>
+      </div>
     </div>
   )
 }

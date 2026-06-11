@@ -1399,8 +1399,8 @@ async def demo_seed(
         {"payment_id": "PAY016", "decision": "matched", "matched_invoice_id": "INV016", "confidence": 0.98, "rationale": "Name and amount match. Correct vendor despite duplicate amount."},
         {"payment_id": "PAY017", "decision": "matched", "matched_invoice_id": "INV017", "confidence": 1.0, "rationale": "Exact match on all fields."},
         {"payment_id": "PAY018", "decision": "matched", "matched_invoice_id": "INV018", "confidence": 1.0, "rationale": "Exact match on all fields."},
-        {"payment_id": "PAY019", "decision": "unmatched", "matched_invoice_id": None, "confidence": 0.95, "rationale": "No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."},
-        {"payment_id": "PAY020", "decision": "unmatched", "matched_invoice_id": None, "confidence": 0.95, "rationale": "No candidates passed name similarity filter (threshold=0.95). Auto-unmatched."},
+        {"payment_id": "PAY019", "decision": "matched", "matched_invoice_id": "INV019", "confidence": 1.0, "rationale": "Exact match on name, amount, and date."},
+        {"payment_id": "PAY020", "decision": "matched", "matched_invoice_id": "INV020", "confidence": 0.98, "rationale": "Name and amount match. Date 1 day apart within tolerance."},
     ]
 
     await crud.save_reconcile_result(db, tenant.id, {

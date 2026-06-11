@@ -130,11 +130,15 @@ export default function App() {
   // Persist across re-renders without triggering re-render themselves
   const autoApproveCountRef = useRef(0)
   const nextVersionRef      = useRef(2)
+  // True after seed-demo buttons — approve/reject then only clear UI state,
+  // never call the real pipeline. Cleared by any real action.
+  const demoSeededRef       = useRef(false)
 
   const handleReconcile = async () => {
     // Reset loop counters on every fresh upload-triggered reconcile
     autoApproveCountRef.current = 0
     nextVersionRef.current = 2
+    demoSeededRef.current = false
     setPipelineRunning(true)
     const stop = startSimulatedLog(RECONCILE_STEPS)
     setLoading('reconcile'); setError(null)
@@ -184,6 +188,7 @@ export default function App() {
   }
 
   const handleJudge = async (autoChain = false, versionNum = 2, iteration = 0) => {
+    demoSeededRef.current = false
     const stop = startSimulatedLog(JUDGE_STEPS, 6000)
     setLoading('judge'); setError(null)
     let proposal: RuleProposal | null = null
@@ -239,6 +244,7 @@ export default function App() {
   }
 
   const handleVerify = async (versionNum = 2, iteration = 0) => {
+    demoSeededRef.current = false
     setLoading('verify'); setError(null)
     let result: VerifyReport | null = null
     try {
@@ -290,6 +296,7 @@ export default function App() {
     setLoading('greedy'); setError(null)
     try {
       await api.seedHacking()
+      demoSeededRef.current = true
       const ver = await api.getLatestVerify().catch(() => null)
       const prop = await api.getLatestProposal().catch(() => null)
       if (ver) { setVerifyReport(ver); if (ver.verdict === 'REWARD_HACKING') setShowBanner(true) }
@@ -301,12 +308,23 @@ export default function App() {
 
   // Manual approve — only needed if auto-loop stopped before GENUINE_IMPROVEMENT
   const handleApprove = () => withLoading('approve', async () => {
+    if (demoSeededRef.current) {
+      // Demo mode: end on the "System Optimal" badge — no real approve, no Gemini
+      setProposal(p => p ? { ...p, changes: [] } : p)
+      setVerifyReport(null); setShowBanner(false)
+      return
+    }
     await api.approveProposal()
     setProposal(null); setVerifyReport(null); setShowBanner(false)
     await refreshHistory()
   })
 
   const handleReject = async () => {
+    if (demoSeededRef.current) {
+      // Demo mode: just dismiss the hacking proposal — no judge restart
+      setProposal(null); setVerifyReport(null); setShowBanner(false)
+      return
+    }
     // Clear frontend state immediately — backend may have already auto-rejected (REWARD_HACKING)
     try { await api.rejectProposal() } catch { /* idempotent — already cleared server-side is OK */ }
     setProposal(null); setVerifyReport(null); setShowBanner(false)
@@ -318,6 +336,7 @@ export default function App() {
 
   const handleSeedDemo = () => withLoading('seed', async () => {
     await api.seedDemo()
+    demoSeededRef.current = true
     const [rec, prop, ver, hist] = await Promise.all([
       api.getLatestReconcile().catch(() => null),
       api.getLatestProposal().catch(() => null),
@@ -333,6 +352,7 @@ export default function App() {
 
   const handleReset = () => withLoading('reset', async () => {
     cancelPipelineRef.current = true
+    demoSeededRef.current = false
     setPipelineRunning(false)
     await api.resetHistory()
     setReconcile(null); setProposal(null); setVerifyReport(null)
