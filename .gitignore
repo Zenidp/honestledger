@@ -38,3 +38,6 @@ gcloud/
 
 # Logs
 *.log
+
+# Local notes
+perintah.md
